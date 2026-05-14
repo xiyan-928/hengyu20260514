@@ -1,0 +1,10 @@
+{
+  "project_root": "",
+  "light_source": {
+    "mode": "mock",
+    "host": "127.0.0.1",
+    "port": 502,
+    "unit": 1,
+    "address": 0
+  }
+}

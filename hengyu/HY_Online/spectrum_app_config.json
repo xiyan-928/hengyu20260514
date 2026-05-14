@@ -1,0 +1,10 @@
+{
+  "project_root": "D:\\临时\\hy_data",
+  "light_source": {
+    "mode": "real",
+    "host": "localhost",
+    "port": 5020,
+    "unit": 10,
+    "address": 0
+  }
+}

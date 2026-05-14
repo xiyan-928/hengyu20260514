@@ -1,0 +1,41 @@
+name: hy_monitor
+description: "HY Monitor - 多设备监控前端，对接 HY_Online/test1.py 聚合服务。"
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.5.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+
+  # 网络
+  http: ^1.2.2
+
+  # 状态管理
+  provider: ^6.1.2
+
+  # 图表
+  fl_chart: ^0.69.0
+
+  # 日期/数字格式化
+  intl: ^0.19.0
+
+  # 文件系统 / 保存下载文件
+  path_provider: ^2.1.4
+  file_picker: ^8.1.2
+
+  # 本地持久化（保存 base_url 等设置）
+  shared_preferences: ^2.3.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+
+flutter:
+  uses-material-design: true

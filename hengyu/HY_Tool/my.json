@@ -1,0 +1,267 @@
+{
+  "_comment": "EC、PH 与 IO 线圈模块的 Modbus 初次配置。current_unit 为出厂/当前地址，configure_writes 写本机地址号，devices 使用目标地址做读取测试。",
+  "modules": [
+    {
+      "name": "EC_TRANSMITTER",
+      "comment": "EC 电导率变送器：出厂默认 unit=1，配置为项目使用的 unit=8。",
+      "current_ip": "192.168.1.12",
+      "current_port": 502,
+      "current_unit": 1,
+      "target_ip": "192.168.1.12",
+      "target_port": 502,
+      "target_unit": 8,
+      "configure_writes": [
+        {
+          "fc": 6,
+          "address": 6,
+          "value": 100,
+          "comment": "电极类型：100 表示 K=1.0"
+        },
+        {
+          "fc": 6,
+          "address": 7,
+          "value": 1000,
+          "comment": "电极常数：写 1000，内部识别为 1.000"
+        },
+        {
+          "fc": 6,
+          "address": 0,
+          "value": 8,
+          "comment": "本机地址号：写 8，将 EC 模块从站地址改为 8；放在最后写，避免后续写入仍使用旧 unit"
+        }
+      ],
+      "devices": [
+        {
+          "name": "DDL",
+          "unit": 8,
+          "fc": 3,
+          "address": 3,
+          "count": 2,
+          "decode": "u32_div100",
+          "comment": "电导率：(高16位*65536+低16位)/100，对应 device_config.json 的 DDL"
+        }
+      ]
+    },
+    {
+      "name": "PH_TRANSMITTER",
+      "comment": "PH/ORP 变送器：出厂默认 unit=2，配置为项目使用的 unit=9。",
+      "current_ip": "192.168.1.12",
+      "current_port": 502,
+      "current_unit": 2,
+      "target_ip": "192.168.1.12",
+      "target_port": 502,
+      "target_unit": 9,
+      "configure_writes": [
+        {
+          "fc": 6,
+          "address": 13,
+          "value": 2,
+          "comment": "PH 温度模式：0=默认，1=手动，2=自动"
+        },
+        {
+          "fc": 6,
+          "address": 0,
+          "value": 9,
+          "comment": "本机地址号：写 9，将 PH 模块从站地址改为 9；放在最后写，避免后续写入仍使用旧 unit"
+        }
+      ],
+      "devices": [
+        {
+          "name": "PH",
+          "unit": 9,
+          "fc": 3,
+          "address": 6,
+          "count": 2,
+          "decode": "raw",
+          "comment": "PH 模块：address=6 温度*10，address=7 PH*100，对应 device_config.json 的 PH"
+        },
+        {
+          "name": "PH_TEMP",
+          "unit": 9,
+          "fc": 3,
+          "address": 6,
+          "count": 1,
+          "decode": "r0_div10",
+          "comment": "PH 温度：数值/10"
+        },
+        {
+          "name": "PH_VALUE",
+          "unit": 9,
+          "fc": 3,
+          "address": 7,
+          "count": 1,
+          "decode": "r0_div100",
+          "comment": "PH 值：数值/100"
+        }
+      ]
+    },
+    {
+      "name": "PT100_PLC",
+      "comment": "PT100 温度通过 PLC holding 寄存器读取：项目使用 unit=20，address=500，读取 2 个寄存器并取第一个寄存器/10。",
+      "current_ip": "192.168.1.12",
+      "current_port": 502,
+      "current_unit": 20,
+      "target_ip": "192.168.1.12",
+      "target_port": 502,
+      "target_unit": 20,
+      "configure_writes": [],
+      "devices": [
+        {
+          "name": "PT100",
+          "unit": 20,
+          "fc": 3,
+          "address": 500,
+          "count": 2,
+          "decode": "r0_div10",
+          "comment": "PLC 温度：读取 holding register 500 起 2 个寄存器，温度=reg0/10，对应 device_config.json 的 PT100"
+        }
+      ]
+    },
+    {
+      "name": "FAN_CONTROLLER",
+      "comment": "风机调速器：寄存器 0x0002 为 MODBUS-485 从机地址，支持 03 读取、06 写入；项目使用 unit=7。",
+      "current_ip": "192.168.1.12",
+      "current_port": 502,
+      "current_unit": 1,
+      "target_ip": "192.168.1.12",
+      "target_port": 502,
+      "target_unit": 7,
+      "configure_writes": [
+        {
+          "fc": 6,
+          "address": 2,
+          "value": 7,
+          "comment": "风机从机地址：写 7，将风机调速器从站地址改为 7；如现场当前地址不是 1，先修改 current_unit"
+        }
+      ],
+      "devices": [
+        {
+          "name": "FAN_UNIT_ADDRESS",
+          "unit": 7,
+          "fc": 3,
+          "address": 2,
+          "count": 1,
+          "decode": "raw",
+          "comment": "读取风机从机地址寄存器 0x0002，返回值应为 7"
+        }
+      ]
+    },
+    {
+      "name": "RELAY_COILS",
+      "comment": "IO 线圈模块：点位来自 HY_Online/define/script_define.xlsx，截图说明默认 IP=192.168.0.10，项目目标 IP=192.168.1.10。",
+      "_note_configure_writes": "IO 模块截图说明支持 0x06 写单个保持寄存器，下面按常见布局写入 IP 四段与 TCP 端口：0-3=IP byte，4=port。若厂家手册寄存器不同，请先改 address 后再执行。",
+      "current_ip": "192.168.0.10",
+      "current_port": 502,
+      "current_unit": 1,
+      "target_ip": "192.168.1.10",
+      "target_port": 502,
+      "target_unit": 1,
+      "configure_writes": [
+        {
+          "fc": 6,
+          "address": 40,
+          "value": 192,
+          "comment": "目标 IP 第 1 段：192；常见布局 holding register 0"
+        },
+        {
+          "fc": 6,
+          "address": 41,
+          "value": 168,
+          "comment": "目标 IP 第 2 段：168；常见布局 holding register 1"
+        },
+        {
+          "fc": 6,
+          "address": 42,
+          "value": 1,
+          "comment": "目标 IP 第 3 段：1；常见布局 holding register 2"
+        },
+        {
+          "fc": 6,
+          "address": 43,
+          "value": 10,
+          "comment": "目标 IP 第 4 段：10；常见布局 holding register 3"
+        },
+        {
+          "fc": 6,
+          "address": 44,
+          "value": 502,
+          "comment": "TCP 端口：502；常见布局 holding register 4"
+        }
+      ],
+      "devices": [
+        {
+          "name": "报警输入",
+          "unit": 1,
+          "fc": 2,
+          "address": 0,
+          "count": 1,
+          "decode": "bits",
+          "comment": "报警为 IO 模块输入点 0，使用功能码 02 读离散输入；与光源输出线圈 address=0 不冲突"
+        },
+        {
+          "name": "光源",
+          "unit": 1,
+          "fc": 1,
+          "address": 0,
+          "count": 1,
+          "decode": "bits",
+          "comment": "script_define 基础点位：光源=0；对应功能码 01 读线圈状态"
+        },
+        {
+          "name": "进液阀",
+          "unit": 1,
+          "fc": 1,
+          "address": 1,
+          "count": 1,
+          "decode": "bits",
+          "comment": "script_define 基础点位：进液阀=1"
+        },
+        {
+          "name": "进水阀",
+          "unit": 1,
+          "fc": 1,
+          "address": 2,
+          "count": 1,
+          "decode": "bits",
+          "comment": "script_define 基础点位：进水阀=2"
+        },
+        {
+          "name": "置换阀",
+          "unit": 1,
+          "fc": 1,
+          "address": 3,
+          "count": 1,
+          "decode": "bits",
+          "comment": "script_define 基础点位：置换阀=3"
+        },
+        {
+          "name": "出液阀",
+          "unit": 1,
+          "fc": 1,
+          "address": 4,
+          "count": 1,
+          "decode": "bits",
+          "comment": "script_define 基础点位：出液阀=4"
+        },
+        {
+          "name": "水泵",
+          "unit": 1,
+          "fc": 1,
+          "address": 5,
+          "count": 1,
+          "decode": "bits",
+          "comment": "script_define 基础点位：水泵=5"
+        },
+        {
+          "name": "ALL_SCRIPT_POINTS",
+          "unit": 1,
+          "fc": 1,
+          "address": 0,
+          "count": 6,
+          "decode": "bits",
+          "comment": "一次性读取 script_define 全部基础点位：[光源, 进液阀, 进水阀, 置换阀, 出液阀, 水泵]"
+        }
+      ]
+    }
+  ]
+}

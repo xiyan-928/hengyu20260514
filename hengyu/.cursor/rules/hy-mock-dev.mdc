@@ -1,0 +1,13 @@
+---
+description: HY mock backend and Flutter frontend dev flow
+alwaysApply: true
+---
+
+# HY Mock Dev Flow
+
+- Backend service lives in `HY_Online`, frontend app lives in `HY_APP`.
+- Start mock backend in a dedicated terminal with `conda run -n ftapi python start.py`.
+- Wait for `http://127.0.0.1:8000/health` to return 200 before launching frontend.
+- In `HY_APP`, run `flutter pub get`, then `dart run build_runner build --delete-conflicting-outputs`.
+- Start frontend with `flutter run` (or `flutter run -d <deviceId>`).
+- Keep backend and frontend in separate terminals during local development.

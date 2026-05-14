@@ -1,0 +1,82 @@
+{
+    "ip": "192.168.1.12",
+    "port": 502,
+    "sensors": {
+        "DDL": {
+            "driver": "DefaultDDL",
+            "enabled": true,
+            "params": {
+                "unit": 8,
+                "address": 3
+            }
+        },
+        "PH": {
+            "driver": "DefaultPH",
+            "enabled": true,
+            "params": {
+                "unit": 9,
+                "address": 6
+            }
+        },
+        "PT100": {
+            "driver": "PLCBasedPT100",
+            "enabled": true,
+            "params": {
+                "unit": 20,
+                "address": 500
+            }
+        }
+    },
+    "relays": {
+        "LIGHT": {
+            "address": 0
+        },
+        "VALVE_OUT": {
+            "address": 3
+        },
+        "VALVE_IN": {
+            "address": 2
+        },
+        "VALVE_CLEAN": {
+            "address": 1
+        }
+    },
+    "alarm": {
+        "enabled": true,
+        "address": 0,
+        "fc": 2,
+        "unit": 1
+    },
+    "fan": {
+        "enabled": true,
+        "unit": 7,
+        "target_temp": 15.0,
+        "stop_temp": 5.0,
+        "start_temp": 15.0,
+        "min_speed": 50,
+        "max_speed": 100,
+        "k_factor": 5
+    },
+    "auto_control": {
+        "enabled": false,
+        "modbus_host": "localhost",
+        "modbus_port": 5020,
+        "unit_id": 10,
+        "monitor_register": 1,
+        "wait_time": 30,
+        "script_define_path": "define/script_define.xlsx"
+    },
+    "modbus_coils": {
+        "host": "192.168.1.10",
+        "port": 502
+    },
+    "modbus_holding": {
+        "host": "192.168.1.12",
+        "port": 502
+    },
+    "manual_coil": {
+        "outlet_point": null,
+        "signal_zero_close_points": [],
+        "autorun_open_points": []
+    }
+}

@@ -1,0 +1,12 @@
+numpy
+fastapi
+uvicorn
+pydantic
+pymodbus==2.5
+python-multipart==0.0.6
+fastapi_offline
+spyc_writer
+pytest>=7.4.0
+openpyxl
+# httpx 0.28+ 与当前 starlette TestClient(app=...) 不兼容，保持 0.27.x
+httpx>=0.25.0,<0.28

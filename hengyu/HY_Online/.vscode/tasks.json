@@ -1,0 +1,27 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "启动HY Online API服务 - 模拟模式",
+			"type": "shell",
+			"command": "D:/ProgramData/Anaconda3/envs/ftapi/python.exe",
+			"args": [
+				"start.py"
+			],
+			"group": "build",
+			"isBackground": true,
+			"problemMatcher": []
+		},
+		{
+			"label": "启动HY Online API服务 - 真实设备模式",
+			"type": "shell",
+			"command": "D:/ProgramData/Anaconda3/envs/ftapi/python.exe",
+			"args": [
+				"start_real.py"
+			],
+			"group": "build",
+			"isBackground": true,
+			"problemMatcher": []
+		}
+	]
+}
