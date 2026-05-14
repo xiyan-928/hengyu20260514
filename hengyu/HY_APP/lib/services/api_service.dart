@@ -13,10 +13,9 @@ class ApiService {
   /// Health check
   Future<bool> checkHealth() async {
     try {
-      final response = await _client
-          .get(Uri.parse('$baseUrl/health'))
-          .timeout(timeout);
-      
+      final response =
+          await _client.get(Uri.parse('$baseUrl/health')).timeout(timeout);
+
       if (response.statusCode == 200) {
         final apiResponse = ApiResponse.fromJson(
           json.decode(response.body),
@@ -71,7 +70,9 @@ class ApiService {
           data: DeviceConfig.fromJson(jsonMap),
         );
       }
-      return ApiResponse(success: false, message: 'Failed to load settings: ${response.statusCode}');
+      return ApiResponse(
+          success: false,
+          message: 'Failed to load settings: ${response.statusCode}');
     } catch (e) {
       return ApiResponse(success: false, message: 'Error loading settings: $e');
     }
@@ -82,7 +83,7 @@ class ApiService {
     try {
       final jsonBody = json.encode(config.toJson());
       print('🔍 [Frontend] Sending updateDeviceSettings request: $jsonBody');
-      
+
       final response = await _client
           .post(
             Uri.parse('$baseUrl/api/settings/device'),
@@ -91,15 +92,19 @@ class ApiService {
           )
           .timeout(timeout);
 
-      print('🔍 [Frontend] updateDeviceSettings response: ${response.statusCode} ${response.body}');
+      print(
+          '🔍 [Frontend] updateDeviceSettings response: ${response.statusCode} ${response.body}');
 
       if (response.statusCode == 200) {
         return ApiResponse(success: true, message: 'Settings updated');
       }
-      return ApiResponse(success: false, message: 'Failed to update settings: ${response.statusCode}');
+      return ApiResponse(
+          success: false,
+          message: 'Failed to update settings: ${response.statusCode}');
     } catch (e) {
       print('🔍 [Frontend] updateDeviceSettings error: $e');
-      return ApiResponse(success: false, message: 'Error updating settings: $e');
+      return ApiResponse(
+          success: false, message: 'Error updating settings: $e');
     }
   }
 
@@ -171,16 +176,19 @@ class ApiService {
 
       try {
         final responseJson = json.decode(response.body);
-        
+
         if (responseJson is Map<String, dynamic>) {
           if (responseJson.containsKey('success')) {
             // Standard API response format
-            final apiResponse = ApiResponse.fromJson(responseJson, (json) => json);
+            final apiResponse =
+                ApiResponse.fromJson(responseJson, (json) => json);
             if (apiResponse.success && apiResponse.data != null) {
               // Handle nested data structure
-              if (apiResponse.data is Map<String, dynamic> && 
+              if (apiResponse.data is Map<String, dynamic> &&
                   (apiResponse.data as Map<String, dynamic>)['types'] is List) {
-                final types = ((apiResponse.data as Map<String, dynamic>)['types'] as List).cast<String>();
+                final types = ((apiResponse.data
+                        as Map<String, dynamic>)['types'] as List)
+                    .cast<String>();
                 return ApiResponse(
                   success: true,
                   message: apiResponse.message,
@@ -217,7 +225,7 @@ class ApiService {
             data: types,
           );
         }
-        
+
         return ApiResponse(
           success: false,
           message: 'Unexpected response format for device types',
@@ -256,10 +264,10 @@ class ApiService {
       }
 
       final responseJson = json.decode(response.body);
-      
+
       if (responseJson is Map<String, dynamic>) {
         final apiResponse = ApiResponse.fromJson(responseJson, (json) => json);
-        
+
         if (apiResponse.success && apiResponse.data != null) {
           // Extract the value from the data object
           if (apiResponse.data is Map<String, dynamic>) {
@@ -274,13 +282,15 @@ class ApiService {
             }
           }
         }
-        
+
         return ApiResponse(
           success: false,
-          message: apiResponse.message.isNotEmpty ? apiResponse.message : 'Failed to extract sensor value',
+          message: apiResponse.message.isNotEmpty
+              ? apiResponse.message
+              : 'Failed to extract sensor value',
         );
       }
-      
+
       return ApiResponse(
         success: false,
         message: 'Unexpected response format for sensor query',
@@ -390,10 +400,8 @@ class ApiService {
   Future<ApiResponse<SpectrumData>> getSpectrumData() async {
     try {
       String url = '$baseUrl/cds350/spectrum';
-      
-      final response = await _client
-          .get(Uri.parse(url))
-          .timeout(timeout);
+
+      final response = await _client.get(Uri.parse(url)).timeout(timeout);
 
       if (response.statusCode != 200) {
         final errorMessage = _parseErrorResponse(response.body);
@@ -436,7 +444,7 @@ class ApiService {
         // Handle missing or null data gracefully and map correct field names
         List<double> wavelengths;
         List<int> intensities;
-        
+
         if (spectrumDataJson['wavelengths'] != null) {
           wavelengths = (spectrumDataJson['wavelengths'] as List)
               .map((e) => (e as num).toDouble())
@@ -444,10 +452,11 @@ class ApiService {
         } else {
           return ApiResponse(
             success: false,
-            message: 'Spectrum data missing wavelengths. Available keys: ${spectrumDataJson.keys.toList()}',
+            message:
+                'Spectrum data missing wavelengths. Available keys: ${spectrumDataJson.keys.toList()}',
           );
         }
-        
+
         // The backend uses 'spectrum' field for intensities, not 'intensities'
         if (spectrumDataJson['spectrum'] != null) {
           intensities = (spectrumDataJson['spectrum'] as List)
@@ -461,17 +470,24 @@ class ApiService {
         } else {
           return ApiResponse(
             success: false,
-            message: 'Spectrum data missing intensities/spectrum field. Available keys: ${spectrumDataJson.keys.toList()}',
+            message:
+                'Spectrum data missing intensities/spectrum field. Available keys: ${spectrumDataJson.keys.toList()}',
           );
         }
 
         // 调试信息：打印API返回的完整数据
-        print('🔍 [API Debug] Full response JSON: ${json.encode(spectrumDataJson)}');
-        print('🔍 [API Debug] acquisition_time: ${spectrumDataJson['acquisition_time']}');
-        print('🔍 [API Debug] last_acquisition_time: ${spectrumDataJson['last_acquisition_time']}');
-        print('🔍 [API Debug] integration_time: ${spectrumDataJson['integration_time']}');
-        print('🔍 [API Debug] scans_to_average: ${spectrumDataJson['scans_to_average']}');
-        print('🔍 [API Debug] acquisition_status: ${spectrumDataJson['acquisition_status']}');
+        print(
+            '🔍 [API Debug] Full response JSON: ${json.encode(spectrumDataJson)}');
+        print(
+            '🔍 [API Debug] acquisition_time: ${spectrumDataJson['acquisition_time']}');
+        print(
+            '🔍 [API Debug] last_acquisition_time: ${spectrumDataJson['last_acquisition_time']}');
+        print(
+            '🔍 [API Debug] integration_time: ${spectrumDataJson['integration_time']}');
+        print(
+            '🔍 [API Debug] scans_to_average: ${spectrumDataJson['scans_to_average']}');
+        print(
+            '🔍 [API Debug] acquisition_status: ${spectrumDataJson['acquisition_status']}');
         print('🔍 [API Debug] success: ${spectrumDataJson['success']}');
         print('🔍 [API Debug] message: ${spectrumDataJson['message']}');
         print('🔍 [API Debug] data: ${spectrumDataJson['data']}');
@@ -479,7 +495,8 @@ class ApiService {
         print('🔍 [API Debug] error: ${spectrumDataJson['error']}');
         print('🔍 [API Debug] stack: ${spectrumDataJson['stack']}');
         print('🔍 [API Debug] timestamp: ${spectrumDataJson['timestamp']}');
-        print('🔍 [API Debug] last_modified: ${spectrumDataJson['last_modified']}');
+        print(
+            '🔍 [API Debug] last_modified: ${spectrumDataJson['last_modified']}');
         print('🔍 [API Debug] created_at: ${spectrumDataJson['created_at']}');
         print('🔍 [API Debug] updated_at: ${spectrumDataJson['updated_at']}');
         print('🔍 [API Debug] __v: ${spectrumDataJson['__v']}');
@@ -499,11 +516,16 @@ class ApiService {
         print('🔍 [API Debug] timeout: ${spectrumDataJson['timeout']}');
         print('🔍 [API Debug] retries: ${spectrumDataJson['retries']}');
         print('🔍 [API Debug] delay: ${spectrumDataJson['delay']}');
-        print('🔍 [API Debug] max_attempts: ${spectrumDataJson['max_attempts']}');
-        print('🔍 [API Debug] min_wavelength: ${spectrumDataJson['min_wavelength']}');
-        print('🔍 [API Debug] max_wavelength: ${spectrumDataJson['max_wavelength']}');
-        print('🔍 [API Debug] min_intensity: ${spectrumDataJson['min_intensity']}');
-        print('🔍 [API Debug] max_intensity: ${spectrumDataJson['max_intensity']}');
+        print(
+            '🔍 [API Debug] max_attempts: ${spectrumDataJson['max_attempts']}');
+        print(
+            '🔍 [API Debug] min_wavelength: ${spectrumDataJson['min_wavelength']}');
+        print(
+            '🔍 [API Debug] max_wavelength: ${spectrumDataJson['max_wavelength']}');
+        print(
+            '🔍 [API Debug] min_intensity: ${spectrumDataJson['min_intensity']}');
+        print(
+            '🔍 [API Debug] max_intensity: ${spectrumDataJson['max_intensity']}');
         print('🔍 [API Debug] gain: ${spectrumDataJson['gain']}');
         print('🔍 [API Debug] offset: ${spectrumDataJson['offset']}');
         print('🔍 [API Debug] exposure: ${spectrumDataJson['exposure']}');
@@ -513,11 +535,14 @@ class ApiService {
         print('🔍 [API Debug] hue: ${spectrumDataJson['hue']}');
         print('🔍 [API Debug] sharpness: ${spectrumDataJson['sharpness']}');
         print('🔍 [API Debug] gamma: ${spectrumDataJson['gamma']}');
-        print('🔍 [API Debug] white_balance: ${spectrumDataJson['white_balance']}');
+        print(
+            '🔍 [API Debug] white_balance: ${spectrumDataJson['white_balance']}');
         print('🔍 [API Debug] black_level: ${spectrumDataJson['black_level']}');
         print('🔍 [API Debug] white_level: ${spectrumDataJson['white_level']}');
-        print('🔍 [API Debug] auto_exposure: ${spectrumDataJson['auto_exposure']}');
-        print('🔍 [API Debug] auto_white_balance: ${spectrumDataJson['auto_white_balance']}');
+        print(
+            '🔍 [API Debug] auto_exposure: ${spectrumDataJson['auto_exposure']}');
+        print(
+            '🔍 [API Debug] auto_white_balance: ${spectrumDataJson['auto_white_balance']}');
         print('🔍 [API Debug] auto_focus: ${spectrumDataJson['auto_focus']}');
         print('🔍 [API Debug] focus_mode: ${spectrumDataJson['focus_mode']}');
         print('🔍 [API Debug] iris: ${spectrumDataJson['iris']}');
@@ -526,8 +551,10 @@ class ApiService {
         print('🔍 [API Debug] laser_power: ${spectrumDataJson['laser_power']}');
         print('🔍 [API Debug] lamp_power: ${spectrumDataJson['lamp_power']}');
         print('🔍 [API Debug] fan_speed: ${spectrumDataJson['fan_speed']}');
-        print('🔍 [API Debug] heater_temperature: ${spectrumDataJson['heater_temperature']}');
-        print('🔍 [API Debug] cooler_temperature: ${spectrumDataJson['cooler_temperature']}');
+        print(
+            '🔍 [API Debug] heater_temperature: ${spectrumDataJson['heater_temperature']}');
+        print(
+            '🔍 [API Debug] cooler_temperature: ${spectrumDataJson['cooler_temperature']}');
         print('🔍 [API Debug] pressure: ${spectrumDataJson['pressure']}');
         print('🔍 [API Debug] humidity: ${spectrumDataJson['humidity']}');
         print('🔍 [API Debug] temperature: ${spectrumDataJson['temperature']}');
@@ -540,43 +567,74 @@ class ApiService {
         print('🔍 [API Debug] duty_cycle: ${spectrumDataJson['duty_cycle']}');
         print('🔍 [API Debug] pulse_width: ${spectrumDataJson['pulse_width']}');
         print('🔍 [API Debug] pulse_delay: ${spectrumDataJson['pulse_delay']}');
-        print('🔍 [API Debug] pulse_repeats: ${spectrumDataJson['pulse_repeats']}');
-        print('🔍 [API Debug] pulse_interval: ${spectrumDataJson['pulse_interval']}');
-        print('🔍 [API Debug] pulse_duration: ${spectrumDataJson['pulse_duration']}');
-        print('🔍 [API Debug] pulse_amplitude: ${spectrumDataJson['pulse_amplitude']}');
-        print('🔍 [API Debug] pulse_offset: ${spectrumDataJson['pulse_offset']}');
+        print(
+            '🔍 [API Debug] pulse_repeats: ${spectrumDataJson['pulse_repeats']}');
+        print(
+            '🔍 [API Debug] pulse_interval: ${spectrumDataJson['pulse_interval']}');
+        print(
+            '🔍 [API Debug] pulse_duration: ${spectrumDataJson['pulse_duration']}');
+        print(
+            '🔍 [API Debug] pulse_amplitude: ${spectrumDataJson['pulse_amplitude']}');
+        print(
+            '🔍 [API Debug] pulse_offset: ${spectrumDataJson['pulse_offset']}');
         print('🔍 [API Debug] pulse_shape: ${spectrumDataJson['pulse_shape']}');
-        print('🔍 [API Debug] pulse_polarity: ${spectrumDataJson['pulse_polarity']}');
+        print(
+            '🔍 [API Debug] pulse_polarity: ${spectrumDataJson['pulse_polarity']}');
         print('🔍 [API Debug] pulse_sync: ${spectrumDataJson['pulse_sync']}');
-        print('🔍 [API Debug] pulse_trigger: ${spectrumDataJson['pulse_trigger']}');
+        print(
+            '🔍 [API Debug] pulse_trigger: ${spectrumDataJson['pulse_trigger']}');
         print('🔍 [API Debug] pulse_mode: ${spectrumDataJson['pulse_mode']}');
-        print('🔍 [API Debug] pulse_source: ${spectrumDataJson['pulse_source']}');
-        print('🔍 [API Debug] pulse_destination: ${spectrumDataJson['pulse_destination']}');
-        print('🔍 [API Debug] pulse_channel: ${spectrumDataJson['pulse_channel']}');
+        print(
+            '🔍 [API Debug] pulse_source: ${spectrumDataJson['pulse_source']}');
+        print(
+            '🔍 [API Debug] pulse_destination: ${spectrumDataJson['pulse_destination']}');
+        print(
+            '🔍 [API Debug] pulse_channel: ${spectrumDataJson['pulse_channel']}');
         print('🔍 [API Debug] pulse_index: ${spectrumDataJson['pulse_index']}');
         print('🔍 [API Debug] pulse_count: ${spectrumDataJson['pulse_count']}');
         print('🔍 [API Debug] pulse_limit: ${spectrumDataJson['pulse_limit']}');
-        print('🔍 [API Debug] pulse_timeout: ${spectrumDataJson['pulse_timeout']}');
-        print('🔍 [API Debug] pulse_interval_ms: ${spectrumDataJson['pulse_interval_ms']}');
-        print('🔍 [API Debug] pulse_duration_ms: ${spectrumDataJson['pulse_duration_ms']}');
-        print('🔍 [API Debug] pulse_amplitude_mv: ${spectrumDataJson['pulse_amplitude_mv']}');
-        print('🔍 [API Debug] pulse_offset_mv: ${spectrumDataJson['pulse_offset_mv']}');
-        print('🔍 [API Debug] pulse_shape_type: ${spectrumDataJson['pulse_shape_type']}');
-        print('🔍 [API Debug] pulse_polarity_type: ${spectrumDataJson['pulse_polarity_type']}');
-        print('🔍 [API Debug] pulse_sync_type: ${spectrumDataJson['pulse_sync_type']}');
-        print('🔍 [API Debug] pulse_trigger_type: ${spectrumDataJson['pulse_trigger_type']}');
-        print('🔍 [API Debug] pulse_mode_type: ${spectrumDataJson['pulse_mode_type']}');
-        print('🔍 [API Debug] pulse_source_type: ${spectrumDataJson['pulse_source_type']}');
-        print('🔍 [API Debug] pulse_destination_type: ${spectrumDataJson['pulse_destination_type']}');
-        print('🔍 [API Debug] pulse_channel_type: ${spectrumDataJson['pulse_channel_type']}');
-        print('🔍 [API Debug] pulse_index_type: ${spectrumDataJson['pulse_index_type']}');
-        print('🔍 [API Debug] pulse_count_type: ${spectrumDataJson['pulse_count_type']}');
-        print('🔍 [API Debug] pulse_limit_type: ${spectrumDataJson['pulse_limit_type']}');
-        print('🔍 [API Debug] pulse_timeout_type: ${spectrumDataJson['pulse_timeout_type']}');
-        print('🔍 [API Debug] pulse_interval_ms_type: ${spectrumDataJson['pulse_interval_ms_type']}');
-        print('🔍 [API Debug] pulse_duration_ms_type: ${spectrumDataJson['pulse_duration_ms_type']}');
-        print('🔍 [API Debug] pulse_amplitude_mv_type: ${spectrumDataJson['pulse_amplitude_mv_type']}');
-        print('🔍 [API Debug] pulse_offset_mv_type: ${spectrumDataJson['pulse_offset_mv_type']}');
+        print(
+            '🔍 [API Debug] pulse_timeout: ${spectrumDataJson['pulse_timeout']}');
+        print(
+            '🔍 [API Debug] pulse_interval_ms: ${spectrumDataJson['pulse_interval_ms']}');
+        print(
+            '🔍 [API Debug] pulse_duration_ms: ${spectrumDataJson['pulse_duration_ms']}');
+        print(
+            '🔍 [API Debug] pulse_amplitude_mv: ${spectrumDataJson['pulse_amplitude_mv']}');
+        print(
+            '🔍 [API Debug] pulse_offset_mv: ${spectrumDataJson['pulse_offset_mv']}');
+        print(
+            '🔍 [API Debug] pulse_shape_type: ${spectrumDataJson['pulse_shape_type']}');
+        print(
+            '🔍 [API Debug] pulse_polarity_type: ${spectrumDataJson['pulse_polarity_type']}');
+        print(
+            '🔍 [API Debug] pulse_sync_type: ${spectrumDataJson['pulse_sync_type']}');
+        print(
+            '🔍 [API Debug] pulse_trigger_type: ${spectrumDataJson['pulse_trigger_type']}');
+        print(
+            '🔍 [API Debug] pulse_mode_type: ${spectrumDataJson['pulse_mode_type']}');
+        print(
+            '🔍 [API Debug] pulse_source_type: ${spectrumDataJson['pulse_source_type']}');
+        print(
+            '🔍 [API Debug] pulse_destination_type: ${spectrumDataJson['pulse_destination_type']}');
+        print(
+            '🔍 [API Debug] pulse_channel_type: ${spectrumDataJson['pulse_channel_type']}');
+        print(
+            '🔍 [API Debug] pulse_index_type: ${spectrumDataJson['pulse_index_type']}');
+        print(
+            '🔍 [API Debug] pulse_count_type: ${spectrumDataJson['pulse_count_type']}');
+        print(
+            '🔍 [API Debug] pulse_limit_type: ${spectrumDataJson['pulse_limit_type']}');
+        print(
+            '🔍 [API Debug] pulse_timeout_type: ${spectrumDataJson['pulse_timeout_type']}');
+        print(
+            '🔍 [API Debug] pulse_interval_ms_type: ${spectrumDataJson['pulse_interval_ms_type']}');
+        print(
+            '🔍 [API Debug] pulse_duration_ms_type: ${spectrumDataJson['pulse_duration_ms_type']}');
+        print(
+            '🔍 [API Debug] pulse_amplitude_mv_type: ${spectrumDataJson['pulse_amplitude_mv_type']}');
+        print(
+            '🔍 [API Debug] pulse_offset_mv_type: ${spectrumDataJson['pulse_offset_mv_type']}');
         print('🔍 [API Debug] __type: ${spectrumDataJson['__type']}');
         print('🔍 [API Debug] __v: ${spectrumDataJson['__v']}');
         print('🔍 [API Debug] _id: ${spectrumDataJson['_id']}');
@@ -595,11 +653,16 @@ class ApiService {
         print('🔍 [API Debug] timeout: ${spectrumDataJson['timeout']}');
         print('🔍 [API Debug] retries: ${spectrumDataJson['retries']}');
         print('🔍 [API Debug] delay: ${spectrumDataJson['delay']}');
-        print('🔍 [API Debug] max_attempts: ${spectrumDataJson['max_attempts']}');
-        print('🔍 [API Debug] min_wavelength: ${spectrumDataJson['min_wavelength']}');
-        print('🔍 [API Debug] max_wavelength: ${spectrumDataJson['max_wavelength']}');
-        print('🔍 [API Debug] min_intensity: ${spectrumDataJson['min_intensity']}');
-        print('🔍 [API Debug] max_intensity: ${spectrumDataJson['max_intensity']}');
+        print(
+            '🔍 [API Debug] max_attempts: ${spectrumDataJson['max_attempts']}');
+        print(
+            '🔍 [API Debug] min_wavelength: ${spectrumDataJson['min_wavelength']}');
+        print(
+            '🔍 [API Debug] max_wavelength: ${spectrumDataJson['max_wavelength']}');
+        print(
+            '🔍 [API Debug] min_intensity: ${spectrumDataJson['min_intensity']}');
+        print(
+            '🔍 [API Debug] max_intensity: ${spectrumDataJson['max_intensity']}');
         print('🔍 [API Debug] gain: ${spectrumDataJson['gain']}');
         print('🔍 [API Debug] offset: ${spectrumDataJson['offset']}');
         print('🔍 [API Debug] exposure: ${spectrumDataJson['exposure']}');
@@ -609,11 +672,14 @@ class ApiService {
         print('🔍 [API Debug] hue: ${spectrumDataJson['hue']}');
         print('🔍 [API Debug] sharpness: ${spectrumDataJson['sharpness']}');
         print('🔍 [API Debug] gamma: ${spectrumDataJson['gamma']}');
-        print('🔍 [API Debug] white_balance: ${spectrumDataJson['white_balance']}');
+        print(
+            '🔍 [API Debug] white_balance: ${spectrumDataJson['white_balance']}');
         print('🔍 [API Debug] black_level: ${spectrumDataJson['black_level']}');
         print('🔍 [API Debug] white_level: ${spectrumDataJson['white_level']}');
-        print('🔍 [API Debug] auto_exposure: ${spectrumDataJson['auto_exposure']}');
-        print('🔍 [API Debug] auto_white_balance: ${spectrumDataJson['auto_white_balance']}');
+        print(
+            '🔍 [API Debug] auto_exposure: ${spectrumDataJson['auto_exposure']}');
+        print(
+            '🔍 [API Debug] auto_white_balance: ${spectrumDataJson['auto_white_balance']}');
         print('🔍 [API Debug] auto_focus: ${spectrumDataJson['auto_focus']}');
         print('🔍 [API Debug] focus_mode: ${spectrumDataJson['focus_mode']}');
         print('🔍 [API Debug] iris: ${spectrumDataJson['iris']}');
@@ -622,8 +688,10 @@ class ApiService {
         print('🔍 [API Debug] laser_power: ${spectrumDataJson['laser_power']}');
         print('🔍 [API Debug] lamp_power: ${spectrumDataJson['lamp_power']}');
         print('🔍 [API Debug] fan_speed: ${spectrumDataJson['fan_speed']}');
-        print('🔍 [API Debug] heater_temperature: ${spectrumDataJson['heater_temperature']}');
-        print('🔍 [API Debug] cooler_temperature: ${spectrumDataJson['cooler_temperature']}');
+        print(
+            '🔍 [API Debug] heater_temperature: ${spectrumDataJson['heater_temperature']}');
+        print(
+            '🔍 [API Debug] cooler_temperature: ${spectrumDataJson['cooler_temperature']}');
         print('🔍 [API Debug] pressure: ${spectrumDataJson['pressure']}');
         print('🔍 [API Debug] humidity: ${spectrumDataJson['humidity']}');
         print('🔍 [API Debug] temperature: ${spectrumDataJson['temperature']}');
@@ -636,43 +704,74 @@ class ApiService {
         print('🔍 [API Debug] duty_cycle: ${spectrumDataJson['duty_cycle']}');
         print('🔍 [API Debug] pulse_width: ${spectrumDataJson['pulse_width']}');
         print('🔍 [API Debug] pulse_delay: ${spectrumDataJson['pulse_delay']}');
-        print('🔍 [API Debug] pulse_repeats: ${spectrumDataJson['pulse_repeats']}');
-        print('🔍 [API Debug] pulse_interval: ${spectrumDataJson['pulse_interval']}');
-        print('🔍 [API Debug] pulse_duration: ${spectrumDataJson['pulse_duration']}');
-        print('🔍 [API Debug] pulse_amplitude: ${spectrumDataJson['pulse_amplitude']}');
-        print('🔍 [API Debug] pulse_offset: ${spectrumDataJson['pulse_offset']}');
+        print(
+            '🔍 [API Debug] pulse_repeats: ${spectrumDataJson['pulse_repeats']}');
+        print(
+            '🔍 [API Debug] pulse_interval: ${spectrumDataJson['pulse_interval']}');
+        print(
+            '🔍 [API Debug] pulse_duration: ${spectrumDataJson['pulse_duration']}');
+        print(
+            '🔍 [API Debug] pulse_amplitude: ${spectrumDataJson['pulse_amplitude']}');
+        print(
+            '🔍 [API Debug] pulse_offset: ${spectrumDataJson['pulse_offset']}');
         print('🔍 [API Debug] pulse_shape: ${spectrumDataJson['pulse_shape']}');
-        print('🔍 [API Debug] pulse_polarity: ${spectrumDataJson['pulse_polarity']}');
+        print(
+            '🔍 [API Debug] pulse_polarity: ${spectrumDataJson['pulse_polarity']}');
         print('🔍 [API Debug] pulse_sync: ${spectrumDataJson['pulse_sync']}');
-        print('🔍 [API Debug] pulse_trigger: ${spectrumDataJson['pulse_trigger']}');
+        print(
+            '🔍 [API Debug] pulse_trigger: ${spectrumDataJson['pulse_trigger']}');
         print('🔍 [API Debug] pulse_mode: ${spectrumDataJson['pulse_mode']}');
-        print('🔍 [API Debug] pulse_source: ${spectrumDataJson['pulse_source']}');
-        print('🔍 [API Debug] pulse_destination: ${spectrumDataJson['pulse_destination']}');
-        print('🔍 [API Debug] pulse_channel: ${spectrumDataJson['pulse_channel']}');
+        print(
+            '🔍 [API Debug] pulse_source: ${spectrumDataJson['pulse_source']}');
+        print(
+            '🔍 [API Debug] pulse_destination: ${spectrumDataJson['pulse_destination']}');
+        print(
+            '🔍 [API Debug] pulse_channel: ${spectrumDataJson['pulse_channel']}');
         print('🔍 [API Debug] pulse_index: ${spectrumDataJson['pulse_index']}');
         print('🔍 [API Debug] pulse_count: ${spectrumDataJson['pulse_count']}');
         print('🔍 [API Debug] pulse_limit: ${spectrumDataJson['pulse_limit']}');
-        print('🔍 [API Debug] pulse_timeout: ${spectrumDataJson['pulse_timeout']}');
-        print('🔍 [API Debug] pulse_interval_ms: ${spectrumDataJson['pulse_interval_ms']}');
-        print('🔍 [API Debug] pulse_duration_ms: ${spectrumDataJson['pulse_duration_ms']}');
-        print('🔍 [API Debug] pulse_amplitude_mv: ${spectrumDataJson['pulse_amplitude_mv']}');
-        print('🔍 [API Debug] pulse_offset_mv: ${spectrumDataJson['pulse_offset_mv']}');
-        print('🔍 [API Debug] pulse_shape_type: ${spectrumDataJson['pulse_shape_type']}');
-        print('🔍 [API Debug] pulse_polarity_type: ${spectrumDataJson['pulse_polarity_type']}');
-        print('🔍 [API Debug] pulse_sync_type: ${spectrumDataJson['pulse_sync_type']}');
-        print('🔍 [API Debug] pulse_trigger_type: ${spectrumDataJson['pulse_trigger_type']}');
-        print('🔍 [API Debug] pulse_mode_type: ${spectrumDataJson['pulse_mode_type']}');
-        print('🔍 [API Debug] pulse_source_type: ${spectrumDataJson['pulse_source_type']}');
-        print('🔍 [API Debug] pulse_destination_type: ${spectrumDataJson['pulse_destination_type']}');
-        print('🔍 [API Debug] pulse_channel_type: ${spectrumDataJson['pulse_channel_type']}');
-        print('🔍 [API Debug] pulse_index_type: ${spectrumDataJson['pulse_index_type']}');
-        print('🔍 [API Debug] pulse_count_type: ${spectrumDataJson['pulse_count_type']}');
-        print('🔍 [API Debug] pulse_limit_type: ${spectrumDataJson['pulse_limit_type']}');
-        print('🔍 [API Debug] pulse_timeout_type: ${spectrumDataJson['pulse_timeout_type']}');
-        print('🔍 [API Debug] pulse_interval_ms_type: ${spectrumDataJson['pulse_interval_ms_type']}');
-        print('🔍 [API Debug] pulse_duration_ms_type: ${spectrumDataJson['pulse_duration_ms_type']}');
-        print('🔍 [API Debug] pulse_amplitude_mv_type: ${spectrumDataJson['pulse_amplitude_mv_type']}');
-        print('🔍 [API Debug] pulse_offset_mv_type: ${spectrumDataJson['pulse_offset_mv_type']}');
+        print(
+            '🔍 [API Debug] pulse_timeout: ${spectrumDataJson['pulse_timeout']}');
+        print(
+            '🔍 [API Debug] pulse_interval_ms: ${spectrumDataJson['pulse_interval_ms']}');
+        print(
+            '🔍 [API Debug] pulse_duration_ms: ${spectrumDataJson['pulse_duration_ms']}');
+        print(
+            '🔍 [API Debug] pulse_amplitude_mv: ${spectrumDataJson['pulse_amplitude_mv']}');
+        print(
+            '🔍 [API Debug] pulse_offset_mv: ${spectrumDataJson['pulse_offset_mv']}');
+        print(
+            '🔍 [API Debug] pulse_shape_type: ${spectrumDataJson['pulse_shape_type']}');
+        print(
+            '🔍 [API Debug] pulse_polarity_type: ${spectrumDataJson['pulse_polarity_type']}');
+        print(
+            '🔍 [API Debug] pulse_sync_type: ${spectrumDataJson['pulse_sync_type']}');
+        print(
+            '🔍 [API Debug] pulse_trigger_type: ${spectrumDataJson['pulse_trigger_type']}');
+        print(
+            '🔍 [API Debug] pulse_mode_type: ${spectrumDataJson['pulse_mode_type']}');
+        print(
+            '🔍 [API Debug] pulse_source_type: ${spectrumDataJson['pulse_source_type']}');
+        print(
+            '🔍 [API Debug] pulse_destination_type: ${spectrumDataJson['pulse_destination_type']}');
+        print(
+            '🔍 [API Debug] pulse_channel_type: ${spectrumDataJson['pulse_channel_type']}');
+        print(
+            '🔍 [API Debug] pulse_index_type: ${spectrumDataJson['pulse_index_type']}');
+        print(
+            '🔍 [API Debug] pulse_count_type: ${spectrumDataJson['pulse_count_type']}');
+        print(
+            '🔍 [API Debug] pulse_limit_type: ${spectrumDataJson['pulse_limit_type']}');
+        print(
+            '🔍 [API Debug] pulse_timeout_type: ${spectrumDataJson['pulse_timeout_type']}');
+        print(
+            '🔍 [API Debug] pulse_interval_ms_type: ${spectrumDataJson['pulse_interval_ms_type']}');
+        print(
+            '🔍 [API Debug] pulse_duration_ms_type: ${spectrumDataJson['pulse_duration_ms_type']}');
+        print(
+            '🔍 [API Debug] pulse_amplitude_mv_type: ${spectrumDataJson['pulse_amplitude_mv_type']}');
+        print(
+            '🔍 [API Debug] pulse_offset_mv_type: ${spectrumDataJson['pulse_offset_mv_type']}');
         print('🔍 [API Debug] __type: ${spectrumDataJson['__type']}');
         print('🔍 [API Debug] __v: ${spectrumDataJson['__v']}');
         print('🔍 [API Debug] _id: ${spectrumDataJson['_id']}');
@@ -691,29 +790,34 @@ class ApiService {
         print('🔍 [API Debug] timeout: ${spectrumDataJson['timeout']}');
         print('🔍 [API Debug] retries: ${spectrumDataJson['retries']}');
         print('🔍 [API Debug] delay: ${spectrumDataJson['delay']}');
-        print('🔍 [API Debug] max_attempts: ${spectrumDataJson['max_attempts']}');
-        print('🔍 [API Debug] min_wavelength: ${spectrumDataJson['min_wavelength']}');
-        print('🔍 [API Debug] max_wavelength: ${spectrumDataJson['max_wavelength']}');
-        print('🔍 [API Debug] min_intensity: ${spectrumDataJson['min_intensity']}');
-        print('🔍 [API Debug] max_intensity: ${spectrumDataJson['max_intensity']}');
+        print(
+            '🔍 [API Debug] max_attempts: ${spectrumDataJson['max_attempts']}');
+        print(
+            '🔍 [API Debug] min_wavelength: ${spectrumDataJson['min_wavelength']}');
+        print(
+            '🔍 [API Debug] max_wavelength: ${spectrumDataJson['max_wavelength']}');
+        print(
+            '🔍 [API Debug] min_intensity: ${spectrumDataJson['min_intensity']}');
+        print(
+            '🔍 [API Debug] max_intensity: ${spectrumDataJson['max_intensity']}');
         print('🔍 [API Debug] gain: ${spectrumDataJson['gain']}');
         print('🔍 [API Debug] offset: ${spectrumDataJson['offset']}');
         print('🔍 [API Debug] exposure: ${spectrumDataJson['exposure']}');
         // ...existing code...
         print('🔍 [API Debug] brightness: ${spectrumDataJson['brightness']}');
-        
+
         return ApiResponse(
           success: true,
           message: 'Success',
           data: SpectrumData.fromJson(spectrumDataJson),
         );
       } catch (parseError) {
-          print('🔍 Spectrum parse error: $parseError');
-          // print('🔍 Response data: ${responseJson['data']}'); // responseJson might not be available here if decode failed, but it is available in this scope
-          return ApiResponse(
-            success: false,
-            message: 'Failed to parse spectrum data: $parseError',
-          );
+        print('🔍 Spectrum parse error: $parseError');
+        // print('🔍 Response data: ${responseJson['data']}'); // responseJson might not be available here if decode failed, but it is available in this scope
+        return ApiResponse(
+          success: false,
+          message: 'Failed to parse spectrum data: $parseError',
+        );
       }
     } catch (e) {
       return ApiResponse(
@@ -793,8 +897,52 @@ class ApiService {
     }
   }
 
+  /// Convert latest dark spectrum to SPC.
+  Future<ApiResponse<Map<String, dynamic>>> convertLatestDarkToSpc() async {
+    try {
+      final response = await _client
+          .get(Uri.parse('$baseUrl/spc/dark/convert-latest'))
+          .timeout(timeout);
+
+      return _handleApiResponse(
+        response,
+        (json) => json as Map<String, dynamic>,
+        '/spc/dark/convert-latest',
+      );
+    } catch (e) {
+      return ApiResponse(
+        success: false,
+        message: 'Failed to convert latest dark SPC: $e',
+      );
+    }
+  }
+
+  /// Convert latest blank spectrum to SPC.
+  Future<ApiResponse<Map<String, dynamic>>> convertLatestBlankToSpc(
+    String blankType,
+  ) async {
+    try {
+      final uri = Uri.parse('$baseUrl/spc/blank/convert-latest').replace(
+        queryParameters: {'blank_type': blankType},
+      );
+      final response = await _client.get(uri).timeout(timeout);
+
+      return _handleApiResponse(
+        response,
+        (json) => json as Map<String, dynamic>,
+        '/spc/blank/convert-latest',
+      );
+    } catch (e) {
+      return ApiResponse(
+        success: false,
+        message: 'Failed to convert latest blank SPC [$blankType]: $e',
+      );
+    }
+  }
+
   /// Control monitor (start/stop background thread)
-  Future<ApiResponse<Map<String, dynamic>>> controlMonitor(String action, {double interval = 2.0}) async {
+  Future<ApiResponse<Map<String, dynamic>>> controlMonitor(String action,
+      {double interval = 2.0}) async {
     try {
       final response = await _client
           .post(
@@ -845,7 +993,7 @@ class ApiService {
       );
     }
   }
-  
+
   //----------------------------------------
   /// Start upload relay for both sensor and SPC uploads.
   Future<ApiResponse<Map<String, dynamic>>> startUploadRelay() async {
@@ -856,9 +1004,7 @@ class ApiService {
 
       return _handleApiResponse(
         response,
-        (json) => json is Map<String, dynamic>
-            ? json
-            : <String, dynamic>{},
+        (json) => json is Map<String, dynamic> ? json : <String, dynamic>{},
         '/api/upload-relay/start',
       );
     } catch (e) {
@@ -879,9 +1025,7 @@ class ApiService {
 
       return _handleApiResponse(
         response,
-        (json) => json is Map<String, dynamic>
-            ? json
-            : <String, dynamic>{},
+        (json) => json is Map<String, dynamic> ? json : <String, dynamic>{},
         '/api/upload-relay/stop',
       );
     } catch (e) {
@@ -925,9 +1069,7 @@ class ApiService {
 
       return _handleApiResponse(
         response,
-        (json) => json is Map<String, dynamic>
-            ? json
-            : <String, dynamic>{},
+        (json) => json is Map<String, dynamic> ? json : <String, dynamic>{},
         '/api/upload-relay/set',
       );
     } catch (e) {
@@ -939,7 +1081,7 @@ class ApiService {
     }
   }
   //----------------------------------------
-  
+
   /// 开机预热选择：通水 / 跳过
   Future<ApiResponse<bool>> postWarmupChoice({required bool withWater}) async {
     try {
@@ -1064,13 +1206,13 @@ class ApiService {
         final jsonMap = json.decode(utf8.decode(response.bodyBytes));
         // Check if it's a standard ApiResponse format
         if (jsonMap is Map<String, dynamic> && jsonMap.containsKey('success')) {
-           return ApiResponse.fromJson(jsonMap, fromJson);
+          return ApiResponse.fromJson(jsonMap, fromJson);
         }
         // If not, assume the whole body is the data (or wrap it)
         return ApiResponse(
-            success: true,
-            message: 'Success',
-            data: fromJson(jsonMap),
+          success: true,
+          message: 'Success',
+          data: fromJson(jsonMap),
         );
       } catch (e) {
         return ApiResponse(
@@ -1081,7 +1223,8 @@ class ApiService {
     } else {
       return ApiResponse(
         success: false,
-        message: 'Request to $endpoint failed: ${_parseErrorResponse(response.body)}',
+        message:
+            'Request to $endpoint failed: ${_parseErrorResponse(response.body)}',
       );
     }
   }

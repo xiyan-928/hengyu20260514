@@ -9,35 +9,56 @@ class ApiSpcHandler {
 
   ApiSpcHandler(this._apiService);
 
+  static Future<bool> copyServerSpcFile(
+    Map<String, dynamic> responseData,
+    String filePath,
+  ) async {
+    final serverFilePath = responseData['file_path'] as String?;
+    if (serverFilePath == null || serverFilePath.isEmpty) {
+      print('SPC response missing file_path');
+      return false;
+    }
+
+    try {
+      final targetFile = File(filePath);
+      final targetDir = targetFile.parent;
+      if (!await targetDir.exists()) {
+        await targetDir.create(recursive: true);
+      }
+
+      final serverFile = File(serverFilePath);
+      if (await serverFile.exists()) {
+        await serverFile.copy(filePath);
+        print('SPC copied from $serverFilePath to: $filePath');
+        return true;
+      }
+      print('SPC server file not found: $serverFilePath');
+      return false;
+    } catch (e) {
+      print('Could not copy SPC file from server path: $e');
+      return false;
+    }
+  }
+
   /// Convert SpectrumData to SPC format using backend API and write to file
-  static Future<bool> writeSpectrumToSpc(SpectrumData spectrum, String filePath) async {
+  static Future<bool> writeSpectrumToSpc(
+      SpectrumData spectrum, String filePath) async {
     try {
       final apiService = ApiService();
-      
+
       // Call backend API to convert spectrum data to SPC format
       print('Converting spectrum to SPC format via backend API...');
       final response = await apiService.convertToSpc(spectrum.toJson());
-      
+
       if (response.success && response.data != null) {
-        // The backend returns metadata including file_path
-        final serverFilePath = response.data!['file_path'] as String;
-        
-        // Since we are running locally, try to copy the file
-        try {
-            final serverFile = File(serverFilePath);
-            if (await serverFile.exists()) {
-                await serverFile.copy(filePath);
-                print('Spectrum data copied from $serverFilePath to: $filePath');
-                apiService.dispose();
-                return true;
-            }
-        } catch (e) {
-            print('Could not copy file from server path: $e');
+        if (await copyServerSpcFile(response.data!, filePath)) {
+          apiService.dispose();
+          return true;
         }
-        
-        print('SPC conversion successful on server: $serverFilePath');
+
+        print('SPC conversion successful on server but copy failed');
         apiService.dispose();
-        return true;
+        return false;
       } else {
         print('SPC conversion failed: ${response.message}');
         apiService.dispose();
@@ -70,10 +91,11 @@ class ApiSpcHandler {
   static SpectrumData? _parseSpcBytes(Uint8List bytes) {
     try {
       final buffer = ByteData.sublistView(bytes);
-      
+
       // Check signature
       final signature = buffer.getUint32(0, Endian.little);
-      if (signature != 0x4B435053) { // 'SPCK'
+      if (signature != 0x4B435053) {
+        // 'SPCK'
         print('Invalid SPC file signature: 0x${signature.toRadixString(16)}');
         return null;
       }

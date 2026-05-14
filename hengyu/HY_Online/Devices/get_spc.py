@@ -1,24 +1,89 @@
 ﻿import datetime
+import logging
 import os
+import tempfile
+import threading
+import time
 from typing import Sequence, Union
 
 import numpy as np
 from SPyC_Writer.SPCEnums import SPCFileType, SPCXType, SPCYType
 from SPyC_Writer.SPCFileWriter import SPCFileWriter
 
-# SPC 文件持久化存储目录（~/spc_files/），进程启动时自动创建
-SPC_OUTPUT_DIR = os.path.expanduser("~/spc_files")
+logger = logging.getLogger(__name__)
+
+_DEFAULT_TEMP_ROOT = os.path.join(tempfile.gettempdir(), "hy_online_spc_files")
+_TEMP_ROOT = os.path.abspath(os.getenv("HY_SPC_TEMP_DIR", _DEFAULT_TEMP_ROOT))
+_CLEAN_INTERVAL_SEC = max(
+    60.0, float(os.getenv("HY_SPC_TEMP_CLEAN_INTERVAL_SEC", "3600"))
+)
+_MAX_AGE_SEC = max(60.0, float(os.getenv("HY_SPC_TEMP_MAX_AGE_SEC", "86400")))
+
+# SPC 临时存储目录。HY_APP 会复制这些文件到 Documents/HY_Data，服务端只保留临时副本。
+SPC_OUTPUT_DIR = _TEMP_ROOT
 os.makedirs(SPC_OUTPUT_DIR, exist_ok=True)
 
-# 参比光谱专用子目录（~/spc_files/blank/）
-BLANK_SPC_OUTPUT_DIR = os.path.expanduser("~/spc_files/blank")
+# 参比光谱专用临时子目录
+BLANK_SPC_OUTPUT_DIR = os.path.join(_TEMP_ROOT, "blank")
 os.makedirs(BLANK_SPC_OUTPUT_DIR, exist_ok=True)
 
-# 暗光谱专用子目录（~/spc_files/dark/）
-DARK_SPC_OUTPUT_DIR = os.path.expanduser("~/spc_files/dark")
+# 暗光谱专用临时子目录
+DARK_SPC_OUTPUT_DIR = os.path.join(_TEMP_ROOT, "dark")
 os.makedirs(DARK_SPC_OUTPUT_DIR, exist_ok=True)
 
 NumberSeq = Union[Sequence[float], Sequence[int], np.ndarray]
+
+_cleanup_thread_started = False
+_cleanup_thread_lock = threading.Lock()
+
+
+def cleanup_old_spc_files(max_age_sec: float = _MAX_AGE_SEC) -> int:
+    """删除 HY_Online 临时 SPC 目录中过期的 .spc 文件，返回删除数量。"""
+    cutoff = time.time() - max_age_sec
+    deleted = 0
+    for root, _, files in os.walk(_TEMP_ROOT):
+        for name in files:
+            if not name.lower().endswith(".spc"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.remove(path)
+                    deleted += 1
+            except FileNotFoundError:
+                continue
+            except OSError as e:
+                logger.warning("删除过期临时 SPC 文件失败 %s: %s", path, e)
+    return deleted
+
+
+def _cleanup_loop() -> None:
+    while True:
+        try:
+            deleted = cleanup_old_spc_files()
+            if deleted:
+                logger.info("已清理 %s 个过期临时 SPC 文件", deleted)
+        except Exception as e:
+            logger.warning("临时 SPC 文件清理任务异常: %s", e)
+        time.sleep(_CLEAN_INTERVAL_SEC)
+
+
+def start_spc_temp_cleanup_thread() -> None:
+    """启动一次后台清理线程；模块可能被重复导入，需保证幂等。"""
+    global _cleanup_thread_started
+    with _cleanup_thread_lock:
+        if _cleanup_thread_started:
+            return
+        thread = threading.Thread(
+            target=_cleanup_loop,
+            name="SpcTempCleanup",
+            daemon=True,
+        )
+        thread.start()
+        _cleanup_thread_started = True
+
+
+start_spc_temp_cleanup_thread()
 
 
 def _is_evenly_spaced(x_array: np.ndarray, rtol: float = 1e-5, atol: float = 1e-6) -> bool:

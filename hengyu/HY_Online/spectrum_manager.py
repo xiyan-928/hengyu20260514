@@ -81,6 +81,7 @@ class SpectrumAcquisitionManager:
     #---------------------------------------
     _BLANK_MAX = 100  # 每个标签类型最多保留的条数上限（全局）
     _DARK_INTERVAL_SEC = 30 * 60
+    _RECOVERY_RETRY_COUNT = 3
     #---------------------------------------
 
     def __init__(self):
@@ -386,7 +387,7 @@ class SpectrumAcquisitionManager:
         operation: Callable[[], Any],
     ) -> Any:
         """
-        在持有 _device_lock 时调用：设备操作失败后检测状态、重启设备并重试一次。
+        在持有 _device_lock 时调用：设备操作失败后检测状态、重启设备并最多重试三次。
         非光谱仪类错误直接抛出，避免把光源/业务错误误判为设备断连。
         """
         try:
@@ -404,30 +405,62 @@ class SpectrumAcquisitionManager:
                 first_error,
                 before_status,
             )
-            try:
-                recovery_result = self._restart_device_locked(
-                    device,
-                    reason=f"{operation_name}失败: {first_error}",
-                )
-            except Exception as restart_error:
-                raise RuntimeError(
-                    f"{operation_name}失败；设备状态: {before_status}；"
-                    f"重启失败: {restart_error}；原始错误: {first_error}"
-                ) from restart_error
+            attempt_errors: List[str] = []
+            last_retry_error: Optional[Exception] = None
+            last_recovery_result: Optional[dict] = None
+            last_status = before_status
 
-            try:
-                result = operation()
-                logger.info("%s在光谱仪重启后重试成功", operation_name)
-                return result
-            except Exception as retry_error:
-                after_status = self._query_device_status_locked(device)
-                with self.data_lock:
-                    self.last_device_error = str(retry_error)
-                raise RuntimeError(
-                    f"{operation_name}失败；已尝试重启光谱仪但重试仍失败。"
-                    f"原始错误: {first_error}；重试错误: {retry_error}；"
-                    f"重启结果: {recovery_result}；当前设备状态: {after_status}"
-                ) from retry_error
+            for attempt in range(1, self._RECOVERY_RETRY_COUNT + 1):
+                try:
+                    last_recovery_result = self._restart_device_locked(
+                        device,
+                        reason=(
+                            f"{operation_name}失败后自动恢复第 {attempt}/"
+                            f"{self._RECOVERY_RETRY_COUNT} 次: {first_error}"
+                        ),
+                    )
+                except Exception as restart_error:
+                    last_retry_error = restart_error
+                    attempt_errors.append(f"第 {attempt} 次重启失败: {restart_error}")
+                    logger.warning(
+                        "%s自动恢复第 %s/%s 次重启失败: %s",
+                        operation_name,
+                        attempt,
+                        self._RECOVERY_RETRY_COUNT,
+                        restart_error,
+                    )
+                    continue
+
+                try:
+                    result = operation()
+                    logger.info(
+                        "%s在光谱仪自动恢复第 %s/%s 次后重试成功",
+                        operation_name,
+                        attempt,
+                        self._RECOVERY_RETRY_COUNT,
+                    )
+                    return result
+                except Exception as retry_error:
+                    last_retry_error = retry_error
+                    last_status = self._query_device_status_locked(device)
+                    with self.data_lock:
+                        self.last_device_error = str(retry_error)
+                    attempt_errors.append(f"第 {attempt} 次重试失败: {retry_error}")
+                    logger.warning(
+                        "%s自动恢复第 %s/%s 次后重试仍失败: error=%s, status=%s",
+                        operation_name,
+                        attempt,
+                        self._RECOVERY_RETRY_COUNT,
+                        retry_error,
+                        last_status,
+                    )
+
+            raise RuntimeError(
+                f"{operation_name}失败；已尝试自动重启并重试 "
+                f"{self._RECOVERY_RETRY_COUNT} 次仍失败。"
+                f"原始错误: {first_error}；恢复过程: {'；'.join(attempt_errors)}；"
+                f"最后重启结果: {last_recovery_result}；当前设备状态: {last_status}"
+            ) from last_retry_error
     
     def get_cached_data(self) -> Optional[SpectrumData]:
         """获取缓存的光谱数据 - 使用数据锁保护读取"""

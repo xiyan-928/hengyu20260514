@@ -1401,7 +1401,7 @@ async def download_spc_file(filename: str):
                 detail="无效的文件名"
             )
         
-        # 在 SPC 持久化目录中查找文件；参比/暗光谱落在子目录中，也一并查找
+        # 在 HY_Online 临时 SPC 目录中查找文件；参比/暗光谱落在子目录中，也一并查找
         from Devices.get_spc import SPC_OUTPUT_DIR, BLANK_SPC_OUTPUT_DIR, DARK_SPC_OUTPUT_DIR
         file_path = os.path.join(SPC_OUTPUT_DIR, filename)
         if not os.path.exists(file_path):
