@@ -26,7 +26,7 @@ class DeviceData {
     this.bridgeState = 'reset',
     this.bridgeError,
     this.bridgeLastUpdateTs,
-    // ---- 工艺/批次元数据（可选，历史页侧栏展示） ----
+    // ---- 工艺/单号元数据（可选，历史页侧栏展示） ----
     this.generationBatch,
     this.fabricWeightG,
     this.fabricLength,
@@ -73,7 +73,7 @@ class DeviceData {
   /// 桥接数据最后更新的 Unix 时间戳（秒）
   final double? bridgeLastUpdateTs;
 
-  /// 生成批次
+  /// 生成单号（generation_batch）
   final String? generationBatch;
 
   /// 布重（g）

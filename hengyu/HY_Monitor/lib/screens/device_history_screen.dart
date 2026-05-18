@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 
+import '../models/batch_info.dart';
 import '../models/device_data.dart';
 import '../providers/device_detail_provider.dart';
 import '../widgets/process_parameters_sidebar.dart';
@@ -22,7 +23,7 @@ class _DeviceHistoryScreenState extends State<DeviceHistoryScreen> {
   @override
   void initState() {
     super.initState();
-    // 进入历史页时拉取批次列表，并自动选中"最新（正在采集）"那个批次。
+    // 进入历史页时拉取单号列表，并自动选中"最新（正在采集）"那个单号。
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       context
@@ -68,8 +69,8 @@ class _DeviceHistoryScreenState extends State<DeviceHistoryScreen> {
     final theme = Theme.of(context);
     final err = p.displayHistoryError;
     final emptyMsg = p.selectedBatch == null
-        ? '尚无任何生产批次数据'
-        : '该批次暂无记录：${p.selectedBatch}';
+        ? '尚无任何生产单号数据'
+        : '该单号暂无记录：${p.selectedBatch}';
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -106,7 +107,7 @@ class _DeviceHistoryScreenState extends State<DeviceHistoryScreen> {
               child: Text(
                 p.selectedBatch == null
                     ? '共 ${history.length} 个样本'
-                    : '批次 ${p.selectedBatch} · ${history.length} 个样本',
+                    : '单号 ${p.selectedBatch} · ${history.length} 个样本',
                 style: theme.textTheme.bodyMedium
                     ?.copyWith(color: theme.colorScheme.outline),
               ),
@@ -149,6 +150,7 @@ class _DeviceHistoryScreenState extends State<DeviceHistoryScreen> {
         final sidebar = ProcessParametersSidebar(
           provider: p,
           data: metaSource,
+          batchCountKind: BatchSidebarCountKind.sensor,
         );
 
         return Padding(

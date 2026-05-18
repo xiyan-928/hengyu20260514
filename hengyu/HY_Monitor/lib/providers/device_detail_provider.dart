@@ -21,7 +21,7 @@ class DeviceDetailProvider extends ChangeNotifier {
   List<SpcFileInfo> _spcFiles = const [];
   Map<String, List<SpcFileInfo>> _blankSpcFiles = const {};
 
-  // 生产批次：列表 + 当前选中 + 该批次记录（null = 显示全部历史）
+  // 生产单号：列表 + 当前选中 + 该单号记录（null = 显示全部历史）
   List<BatchInfo> _batches = const [];
   String? _selectedBatch;
   List<DeviceData> _batchHistory = const [];
@@ -64,8 +64,8 @@ class DeviceDetailProvider extends ChangeNotifier {
   String? get batchesError => _batchesError;
   String? get batchHistoryError => _batchHistoryError;
 
-  /// 历史页/侧栏统一使用：始终展示当前选中批次的记录。
-  /// 批次列表为空或加载中时返回空列表。
+  /// 历史页/侧栏统一使用：始终展示当前选中单号的记录。
+  /// 单号列表为空或加载中时返回空列表。
   List<DeviceData> get displayHistory => _batchHistory;
 
   bool get displayHistoryLoading =>
@@ -144,10 +144,10 @@ class DeviceDetailProvider extends ChangeNotifier {
     }
   }
 
-  /// 拉取该设备的批次列表。
+  /// 拉取该设备的单号列表。
   ///
-  /// [autoSelectLatest] = true 时（仅历史页首次加载使用）：列表非空且当前未选批次，
-  /// 自动选中第一项（服务端按 mtime 倒序返回 → 即"最新 / 当前正在采集"那个批次）。
+  /// [autoSelectLatest] = true 时（仅历史页首次加载使用）：列表非空且当前未选单号，
+  /// 自动选中第一项（服务端按 mtime 倒序返回 → 即"最新 / 当前正在采集"那个单号）。
   Future<void> refreshBatches({bool autoSelectLatest = false}) async {
     if (_disposed) return;
     if (_batchesLoading) {
@@ -167,7 +167,7 @@ class DeviceDetailProvider extends ChangeNotifier {
     try {
       _batches = await _api.listBatches(deviceId);
       _batchesError = null;
-      // 如果当前选中的批次已不存在（被删除/重名），改选最新批次（若有）
+      // 如果当前选中的单号已不存在（被删除/重名），改选最新单号（若有）
       if (_selectedBatch != null &&
           !_batches.any((b) => b.batch == _selectedBatch)) {
         _selectedBatch = null;
@@ -189,7 +189,7 @@ class DeviceDetailProvider extends ChangeNotifier {
     }
   }
 
-  /// 确保依赖批次的页面（SPC / 参比光谱）可以直接进入并读取数据。
+  /// 确保依赖单号的页面（SPC / 参比光谱）可以直接进入并读取数据。
   Future<void> ensureBatchSelected() async {
     if (_disposed) return;
     if (_selectedBatch != null && _selectedBatch!.isNotEmpty) return;
@@ -199,7 +199,7 @@ class DeviceDetailProvider extends ChangeNotifier {
     }
   }
 
-  /// 一键回到"最新（正在采集）批次"。
+  /// 一键回到"最新（正在采集）单号"。
   Future<void> selectLatestBatch() async {
     if (_batches.isEmpty) {
       await refreshBatches(autoSelectLatest: true);
@@ -208,7 +208,7 @@ class DeviceDetailProvider extends ChangeNotifier {
     await selectBatch(_batches.first.batch);
   }
 
-  /// 选择批次：按批次名加载对应 CSV 文件的记录并替换 displayHistory。
+  /// 选择单号：按单号加载对应 CSV 文件的记录并替换 displayHistory。
   Future<void> selectBatch(String batch) async {
     if (batch == _selectedBatch) return;
     _selectedBatch = batch;
@@ -231,7 +231,7 @@ class DeviceDetailProvider extends ChangeNotifier {
     }
   }
 
-  /// 重新加载当前选中的批次（若有）。
+  /// 重新加载当前选中的单号（若有）。
   Future<void> refreshSelectedBatch() async {
     final cur = _selectedBatch;
     if (cur == null) return;

@@ -133,12 +133,11 @@ class ApiSpcHandler {
         intensities.add(y.round());
       }
 
-      return SpectrumData(
+      return SpectrumData.fromRawAcquisition(
         wavelengths: wavelengths,
         intensities: intensities,
         timestamp: DateTime.fromMillisecondsSinceEpoch(timestamp * 1000),
-        length: wavelengths.length,
-        integrationTime: 1000, // Default value
+        integrationTime: 1000,
         scansToAverage: scansToAverage,
       );
     } catch (e) {

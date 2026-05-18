@@ -274,16 +274,12 @@ class SpectrumProvider with ChangeNotifier {
       
       if (wavelengths.isNotEmpty && intensities.isNotEmpty) {
         print('🔥 Creating spectrum data with ${wavelengths.length} points');
-        _currentSpectrum = SpectrumData(
+        _currentSpectrum = SpectrumData.fromRawAcquisition(
           wavelengths: wavelengths,
           intensities: intensities.map((e) => e.toInt()).toList(),
           timestamp: timestamp != null ? DateTime.parse(timestamp) : DateTime.now(),
-          length: wavelengths.length,
           integrationTime: _integrationTime,
           scansToAverage: _scansToAverage,
-          dyeContent: message['dyeContent'] as double?,
-          additiveContent: message['additiveContent'] as double?,
-          zjType: message['zjType'] as String?,
           lastAcquisitionTime: lastAcquisitionTime,
           acquisitionStatus: acquisitionStatus,
         );

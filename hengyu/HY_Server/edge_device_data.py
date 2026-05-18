@@ -30,7 +30,7 @@ class DeviceData(BaseModel):
     last_error: Optional[str] = None
     running: bool = True
     interval: float = 2.0
-    # ---- 工艺/批次元数据（可选，监控历史页侧栏展示） ----
+    # ---- 工艺/单号元数据（可选，监控历史页侧栏展示） ----
     generation_batch: Optional[str] = None
     fabric_weight_g: Optional[float] = None
     fabric_length: Optional[float] = None

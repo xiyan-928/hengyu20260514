@@ -1,7 +1,11 @@
-﻿import threading
+﻿import os
+import threading
 import time
 import logging
 from typing import Optional, Callable, Any
+from urllib import error as urlerror
+from urllib import parse
+from urllib import request
 
 from pymodbus.client.sync import ModbusTcpClient
 from Devices.device_settings import DeviceSettings
@@ -68,6 +72,9 @@ class AutoControlManager:
 
         # 缓存配置
         self._settings = DeviceSettings.instance()
+        self._last_reload_enabled = bool(
+            self._settings.get_auto_control_settings().get("enabled", False)
+        )
         set_warmup_script_complete_callback(self._on_warmup_script_complete)
             
     def get_status(self) -> dict:
@@ -267,7 +274,8 @@ class AutoControlManager:
         """Reload settings and update status"""
         config = self._settings.get_auto_control_settings()
         enabled = config.get('enabled', False)
-        
+        prev_enabled = self._last_reload_enabled
+
         logger.debug(
             f"Auto Control: Reloading settings. Enabled={enabled}, Thread Running={self._running}"
         )
@@ -303,6 +311,82 @@ class AutoControlManager:
             load_auto_control_scripts_at_startup()
         except Exception as e:
             logger.error(f"Auto Control: 重载 script_define 失败: {e}")
+
+        if prev_enabled is True and not enabled:
+            self._schedule_production_end_notify("auto_control_disabled")
+        self._last_reload_enabled = enabled
+
+    def _schedule_production_end_notify(self, reason: str) -> None:
+        """非阻塞通知 HY_Server 清除本锅单号缓存（与显式空 generation_batch 等效）。"""
+        threading.Thread(
+            target=self._notify_server_production_end,
+            args=(reason,),
+            name="production-end-notify",
+            daemon=True,
+        ).start()
+
+    def _notify_server_production_end(self, reason: str) -> None:
+        base = (
+            (os.getenv("HY_SERVER_UPLOAD_BASE") or os.getenv("UPLOAD_BASE") or "")
+            .strip()
+            .rstrip("/")
+        )
+        if not base:
+            logger.debug(
+                "production-end: 未配置 HY_SERVER_UPLOAD_BASE/UPLOAD_BASE，跳过 reason=%s",
+                reason,
+            )
+            return
+        dev_id = (os.getenv("HY_ONLINE_DEVICE_ID") or "").strip()
+        if not dev_id:
+            logger.debug(
+                "production-end: 未配置 HY_ONLINE_DEVICE_ID，跳过 reason=%s", reason
+            )
+            return
+        url = f"{base}/device/{parse.quote(dev_id, safe='')}/production-end"
+        req = request.Request(url, data=b"", method="POST")
+        try:
+            with request.urlopen(req, timeout=8.0) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        "production-end: HTTP %s reason=%s url=%s",
+                        resp.status,
+                        reason,
+                        url,
+                    )
+                    return
+                LOG_SIGNAL.info(
+                    "已通知服务端本锅结束（清除单号缓存）reason=%s", reason
+                )
+        except urlerror.URLError as e:
+            logger.warning("production-end: 请求失败 reason=%s err=%s", reason, e)
+            return
+
+        self._notify_online_clear_order_display(reason)
+
+    def _notify_online_clear_order_display(self, reason: str) -> None:
+        """清除 HY_Online 上 App 可见的单号（server + manual）。"""
+        ob = (
+            (os.getenv("HY_ONLINE_BASE") or os.getenv("DATA_SOURCE_BASE") or "http://127.0.0.1:8000")
+            .strip()
+            .rstrip("/")
+        )
+        if not ob:
+            return
+        ourl = f"{ob}/api/order-number/production-end"
+        oreq = request.Request(ourl, data=b"", method="POST")
+        try:
+            with request.urlopen(oreq, timeout=8.0) as oresp:
+                if oresp.status != 200:
+                    logger.warning(
+                        "production-end: 清除本机单号显示 HTTP %s reason=%s",
+                        oresp.status,
+                        reason,
+                    )
+                else:
+                    LOG_SIGNAL.info("已清除本机 App 单号显示 reason=%s", reason)
+        except urlerror.URLError as e:
+            logger.warning("production-end: 清除本机单号显示失败 reason=%s err=%s", reason, e)
 
     def _refresh_alarm_state(self, ctx: AutoControlContext) -> None:
         """根据 get_alarm_message 更新 _is_alarming，并在边沿打印与旧逻辑一致的日志。"""
@@ -531,6 +615,7 @@ class AutoControlManager:
         # 状态 0: 关闭相关点位（默认 script_define 全部基础点位）
         if val == 0:
             if self._last_val != 0:
+                was_auto_run = self._last_val == 1
                 LOG_SIGNAL.info("控制流程: 信号为 0，关闭线圈点位")
                 for pname in close_on_zero:
                     self._request_valve_switch(pname, 0, pname)
@@ -549,6 +634,9 @@ class AutoControlManager:
                     # 并且为了保持监控，SDM应该一直运行
                     # SensorDataManager.instance().stop_auto_update() 
                     pass
+
+                if was_auto_run:
+                    self._schedule_production_end_notify("monitor_signal_1_to_0")
                 
         # 状态 1: 计时 -> 打开阀门 -> 启动光谱
         elif val == 1:

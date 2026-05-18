@@ -13,7 +13,7 @@ class SettingsService {
   // Default values
   static const int defaultIntegrationTime = 10000; // microseconds
   static const int defaultScansToAverage = 3;
-  static const int defaultSpectrumQueryInterval = 5; // seconds
+  static const int defaultSpectrumQueryInterval = 60; // seconds; 与 HY_Online / upload_client SPC 间隔一致
   static const SpectrumFileFormat defaultSpectrumFileFormat = SpectrumFileFormat.spc;
 
   /// Get integration time from preferences

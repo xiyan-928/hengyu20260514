@@ -78,5 +78,8 @@
         "outlet_point": null,
         "signal_zero_close_points": [],
         "autorun_open_points": []
+    },
+    "spectrum": {
+        "query_interval_sec": 60
     }
 }

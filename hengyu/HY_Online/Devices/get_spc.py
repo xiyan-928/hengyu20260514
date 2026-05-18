@@ -4,9 +4,11 @@ import os
 import tempfile
 import threading
 import time
-from typing import Sequence, Union
+from typing import Optional, Sequence, Union
 
 import numpy as np
+
+from order_number_state import spectrum_archive_folder_name
 from SPyC_Writer.SPCEnums import SPCFileType, SPCXType, SPCYType
 from SPyC_Writer.SPCFileWriter import SPCFileWriter
 
@@ -19,17 +21,56 @@ _CLEAN_INTERVAL_SEC = max(
 )
 _MAX_AGE_SEC = max(60.0, float(os.getenv("HY_SPC_TEMP_MAX_AGE_SEC", "86400")))
 
-# SPC 临时存储目录。HY_APP 会复制这些文件到 Documents/HY_Data，服务端只保留临时副本。
+# SPC 临时存储根目录。实际文件落在 ``{根}/{设备号_yyyy年MM月dd日_单号}/`` 下（见 get_spectrum_session_dir）。
+# HY_APP 会复制这些文件到 Documents/HY_Data，服务端只保留临时副本。
 SPC_OUTPUT_DIR = _TEMP_ROOT
 os.makedirs(SPC_OUTPUT_DIR, exist_ok=True)
 
-# 参比光谱专用临时子目录
-BLANK_SPC_OUTPUT_DIR = os.path.join(_TEMP_ROOT, "blank")
-os.makedirs(BLANK_SPC_OUTPUT_DIR, exist_ok=True)
 
-# 暗光谱专用临时子目录
-DARK_SPC_OUTPUT_DIR = os.path.join(_TEMP_ROOT, "dark")
-os.makedirs(DARK_SPC_OUTPUT_DIR, exist_ok=True)
+def get_spectrum_session_dir() -> str:
+    """当日、当前单号对应的归档目录（绝对路径）。"""
+    rel = spectrum_archive_folder_name()
+    path = os.path.join(SPC_OUTPUT_DIR, rel)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_blank_spc_dir() -> str:
+    path = os.path.join(get_spectrum_session_dir(), "blank")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def get_dark_spc_dir() -> str:
+    path = os.path.join(get_spectrum_session_dir(), "dark")
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def find_spc_file_for_download(filename: str) -> Optional[str]:
+    """在临时根下按文件名解析 .spc 路径；兼容升级前的扁平 blank/dark 目录。"""
+    if ".." in filename or "/" in filename or "\\" in filename:
+        return None
+    name = filename if filename.lower().endswith(".spc") else f"{filename}.spc"
+    session = get_spectrum_session_dir()
+    roots = [
+        session,
+        os.path.join(session, "blank"),
+        os.path.join(session, "dark"),
+        os.path.join(_TEMP_ROOT, "blank"),
+        os.path.join(_TEMP_ROOT, "dark"),
+        _TEMP_ROOT,
+    ]
+    for root in roots:
+        p = os.path.join(root, name)
+        if os.path.isfile(p):
+            return p
+    for root, _, files in os.walk(_TEMP_ROOT):
+        if name in files:
+            candidate = os.path.join(root, name)
+            if os.path.isfile(candidate):
+                return candidate
+    return None
 
 NumberSeq = Union[Sequence[float], Sequence[int], np.ndarray]
 
@@ -122,9 +163,11 @@ def write_spc(x_values: NumberSeq, y_values: NumberSeq, spc_name: str = None) ->
         elif not spc_name.endswith('.spc'):
             spc_name += '.spc'
         
-        # 确保文件路径是绝对路径
+        # 确保文件路径是绝对路径（相对名仅取 basename，写入当日会话目录）
         if not os.path.isabs(spc_name):
-            spc_name = os.path.join(SPC_OUTPUT_DIR, spc_name)
+            spc_name = os.path.join(
+                get_spectrum_session_dir(), os.path.basename(spc_name)
+            )
 
         # 目录不存在时自动创建
         os.makedirs(os.path.dirname(spc_name), exist_ok=True)

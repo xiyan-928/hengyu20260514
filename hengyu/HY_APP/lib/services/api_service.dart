@@ -441,33 +441,9 @@ class ApiService {
           );
         }
 
-        // Handle missing or null data gracefully and map correct field names
-        List<double> wavelengths;
-        List<int> intensities;
-
-        if (spectrumDataJson['wavelengths'] != null) {
-          wavelengths = (spectrumDataJson['wavelengths'] as List)
-              .map((e) => (e as num).toDouble())
-              .toList();
-        } else {
-          return ApiResponse(
-            success: false,
-            message:
-                'Spectrum data missing wavelengths. Available keys: ${spectrumDataJson.keys.toList()}',
-          );
-        }
-
-        // The backend uses 'spectrum' field for intensities, not 'intensities'
-        if (spectrumDataJson['spectrum'] != null) {
-          intensities = (spectrumDataJson['spectrum'] as List)
-              .map((e) => (e as num).toInt())
-              .toList();
-        } else if (spectrumDataJson['intensities'] != null) {
-          // Fallback to 'intensities' field if available
-          intensities = (spectrumDataJson['intensities'] as List)
-              .map((e) => (e as num).toInt())
-              .toList();
-        } else {
+        // 真实设备返回 wavelengths + spectrum；模拟模式可仅返回固定网格 spectrum（由 SpectrumData.fromJson 处理）
+        if (spectrumDataJson['spectrum'] == null &&
+            spectrumDataJson['intensities'] == null) {
           return ApiResponse(
             success: false,
             message:
@@ -809,7 +785,8 @@ class ApiService {
         return ApiResponse(
           success: true,
           message: 'Success',
-          data: SpectrumData.fromJson(spectrumDataJson),
+          data: SpectrumData.fromJson(spectrumDataJson)
+              .withNormalizedAcquisitionSeries(),
         );
       } catch (parseError) {
         print('🔍 Spectrum parse error: $parseError');
@@ -1225,6 +1202,69 @@ class ApiService {
         success: false,
         message:
             'Request to $endpoint failed: ${_parseErrorResponse(response.body)}',
+      );
+    }
+  }
+
+  /// 拉取当前生效的单号、来源、设备号与对应目录。
+  /// 优先级：服务端下发 > App 手动输入 > 占位 `未获取`。
+  Future<ApiResponse<Map<String, dynamic>>> getOrderNumberState() async {
+    try {
+      final response = await _client
+          .get(Uri.parse('$baseUrl/api/order-number'))
+          .timeout(timeout);
+      return _handleApiResponse(
+        response,
+        (json) => json is Map ? Map<String, dynamic>.from(json) : <String, dynamic>{},
+        '/api/order-number',
+      );
+    } catch (e) {
+      return ApiResponse(
+        success: false,
+        message: 'Failed to load order number state: $e',
+      );
+    }
+  }
+
+  /// 提交 App 上手动输入的单号；传 null 或空串等价于清除手动值。
+  Future<ApiResponse<Map<String, dynamic>>> setManualOrderNumber(
+      String? orderNumber) async {
+    try {
+      final response = await _client
+          .post(
+            Uri.parse('$baseUrl/api/order-number/manual'),
+            headers: {'Content-Type': 'application/json'},
+            body: json.encode({'order_number': orderNumber}),
+          )
+          .timeout(timeout);
+      return _handleApiResponse(
+        response,
+        (json) => json is Map ? Map<String, dynamic>.from(json) : <String, dynamic>{},
+        '/api/order-number/manual',
+      );
+    } catch (e) {
+      return ApiResponse(
+        success: false,
+        message: 'Failed to set manual order number: $e',
+      );
+    }
+  }
+
+  /// 显式清除手动输入的单号（服务端 server_value 不受影响）。
+  Future<ApiResponse<Map<String, dynamic>>> clearManualOrderNumber() async {
+    try {
+      final response = await _client
+          .delete(Uri.parse('$baseUrl/api/order-number/manual'))
+          .timeout(timeout);
+      return _handleApiResponse(
+        response,
+        (json) => json is Map ? Map<String, dynamic>.from(json) : <String, dynamic>{},
+        '/api/order-number/manual',
+      );
+    } catch (e) {
+      return ApiResponse(
+        success: false,
+        message: 'Failed to clear manual order number: $e',
       );
     }
   }

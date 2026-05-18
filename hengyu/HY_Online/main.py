@@ -14,6 +14,10 @@ import logging
 import traceback
 import os
 import sys
+import asyncio
+import urllib.error
+import urllib.request
+import urllib.parse
 import datetime
 import time
 import json
@@ -43,6 +47,8 @@ from upload_relay_state import as_dict as upload_relay_as_dict
 from upload_relay_state import set_both as upload_relay_set_both
 from upload_relay_state import set_partial as upload_relay_set_partial
 #-------------------------------------------
+import order_number_state
+#-------------------------------------------
 
 from device_factory import DeviceFactory
 from spectrum_manager import spectrum_manager
@@ -57,6 +63,65 @@ from modbus_logging import modbus_context
 from light_source_service import write_coil as write_light_coil
 
 logger = logging.getLogger(__name__)
+
+# 与 upload_client_example 默认一致；可用 HY_SERVER_UPLOAD_BASE 或 UPLOAD_BASE 覆盖
+_DEFAULT_HY_SERVER_UPLOAD_BASE = "http://127.0.0.1:8001"
+
+
+def _resolve_hy_server_upload_base() -> str:
+    return (
+        os.getenv("HY_SERVER_UPLOAD_BASE") or os.getenv("UPLOAD_BASE") or _DEFAULT_HY_SERVER_UPLOAD_BASE
+    ).strip().rstrip("/")
+
+
+def _resolve_device_id_for_hy_server_sync() -> str:
+    did = (order_number_state.get_device_id() or "").strip()
+    if did:
+        return did
+    return (os.getenv("HY_ONLINE_DEVICE_ID") or "device_002").strip()
+
+
+def _sync_effective_order_to_hy_server() -> Dict[str, Any]:
+    """将当前生效单号 POST 到 HY_Server，以更新工艺缓存并触发 ``_upload_spc`` 归档目录重命名。
+
+    返回字典供接口写入 ``hy_server_sync``；未配置环境变量时使用与 upload_client 相同的默认地址。
+    """
+    base = _resolve_hy_server_upload_base()
+    if not base:
+        msg = "HY_Server 根地址为空"
+        logger.warning(msg)
+        return {"ok": False, "skipped": True, "message": msg}
+    did = _resolve_device_id_for_hy_server_sync()
+    if not did:
+        msg = "device_id 为空，无法同步到 HY_Server"
+        logger.warning(msg)
+        return {"ok": False, "skipped": True, "message": msg}
+    snap = order_number_state.snapshot()
+    eff = str(snap.get("effective") or "").strip()
+    url = f"{base}/device/{urllib.parse.quote(did, safe='')}/order_number"
+    if eff and eff != order_number_state.PLACEHOLDER:
+        body = json.dumps({"order_number": eff}, ensure_ascii=False).encode("utf-8")
+    else:
+        body = json.dumps({"order_number": None}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url,
+        data=body,
+        method="POST",
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            resp.read()
+        logger.info("已将生效单号同步到 HY_Server device=%s base=%s", did, base)
+        return {"ok": True, "base": base, "device_id": did, "url": url}
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", errors="replace")[:500]
+        logger.warning("同步单号到 HY_Server HTTP %s: %s", e.code, detail)
+        return {"ok": False, "base": base, "device_id": did, "http_status": e.code, "detail": detail}
+    except urllib.error.URLError as e:
+        logger.warning("同步单号到 HY_Server 失败: %s", e)
+        return {"ok": False, "base": base, "device_id": did, "detail": str(e.reason or e)}
+
 
 # 创建FastAPI应用
 app = FastAPIOffline(
@@ -252,6 +317,15 @@ class UploadRelaySetRequest(BaseModel):
     )
 
 #-------------------------------------------
+class OrderNumberManualRequest(BaseModel):
+    """前端 HY_APP 手动输入的单号；传 null 或空字符串等价于清除。"""
+
+    order_number: Optional[str] = Field(
+        default=None,
+        description="单号文本，前端手动输入；为空字符串/null 时清除手动值",
+    )
+
+#-------------------------------------------
 
 class WarmupChoiceRequest(BaseModel):
     """开机预热选择：是否通水冲洗"""
@@ -287,10 +361,22 @@ class CDS350Config(BaseModel):
     )
 
 class SpectrumData(BaseModel):
-    """光谱数据模型"""
-    wavelengths: List[float] = Field(..., description="波长数据", example=[400.0, 401.0, 402.0])
-    spectrum: List[float] = Field(..., description="光谱强度数据", example=[1000.5, 1001.2, 999.8])
-    output_filename: Optional[str] = Field(None, description="输出文件名（不含扩展名）", example="spectrum_20250715")
+    """光谱数据模型（波长可省略：缺省时按 200 nm 起、步长 1 nm 与 spectrum 对齐）。"""
+    wavelengths: Optional[List[float]] = Field(
+        None,
+        description="波长数据；若省略则由服务端按固定网格 200..200+len(spectrum)-1 生成",
+        example=[400.0, 401.0, 402.0],
+    )
+    spectrum: List[float] = Field(
+        ...,
+        description="光谱强度数据（与 wavelengths 等长；无 wavelengths 时为固定网格上的强度序列）",
+        example=[1000.5, 1001.2, 999.8],
+    )
+    output_filename: Optional[str] = Field(
+        None,
+        description="输出文件名（不含扩展名）",
+        example="spectrum_20250715",
+    )
 
 class DeviceResetRequest(BaseModel):
     """设备重置请求模型"""
@@ -467,6 +553,10 @@ async def startup_event():
     device_config.reload_config()
     auto_control_manager.reset_warmup_flags()
     auto_control_manager.start()
+    # HY_ONLINE_DEVICE_ID 由 upload_client_example / 启动脚本注入；缺省时使用 device_002
+    order_number_state.configure_device_id(
+        os.getenv("HY_ONLINE_DEVICE_ID", "device_002")
+    )
 
 @app.on_event("shutdown")
 async def shutdown_event():
@@ -630,6 +720,89 @@ async def post_upload_relay_set(body: UploadRelaySetRequest):
         success=True,
         message="upload relay 已更新",
         data=d,
+    )
+
+
+#-------------------------------------------
+@app.get("/api/order-number", response_model=Response, tags=["OrderNumber"])
+async def get_order_number_state():
+    """返回当前生效单号、来源、设备号与对应文件夹路径。
+
+    生效优先级：**server > manual > 占位「未获取」**。服务器一旦有非空下发即覆盖手改；
+    upload_client_example 轮询写入 server；App 仅在本机 **尚无服务器单号** 时手改才生效。
+    """
+    return Response(
+        success=True,
+        message="ok",
+        data=order_number_state.snapshot(),
+    )
+
+
+@app.post("/api/order-number/manual", response_model=Response, tags=["OrderNumber"])
+async def post_order_number_manual(body: OrderNumberManualRequest):
+    """前端 App 提交手动输入的单号；为空字符串/null 时清除手动值。"""
+    data = order_number_state.set_manual_value(body.order_number)
+    hy_sync = await asyncio.to_thread(_sync_effective_order_to_hy_server)
+    payload = dict(data)
+    payload["hy_server_sync"] = hy_sync
+    return Response(
+        success=True,
+        message="手动单号已更新",
+        data=payload,
+    )
+
+
+@app.delete("/api/order-number/manual", response_model=Response, tags=["OrderNumber"])
+async def delete_order_number_manual():
+    """显式清除手动输入的单号；服务端下发的 server_value 不受影响。"""
+    data = order_number_state.clear_manual_value()
+    hy_sync = await asyncio.to_thread(_sync_effective_order_to_hy_server)
+    payload = dict(data)
+    payload["hy_server_sync"] = hy_sync
+    return Response(
+        success=True,
+        message="手动单号已清除",
+        data=payload,
+    )
+
+
+@app.post("/api/order-number/server", response_model=Response, tags=["OrderNumber"])
+async def post_order_number_server(body: OrderNumberManualRequest):
+    """upload_client_example 轮询 HY_Server 后调用本端点写入 server_value。
+
+    主服务与上报客户端是独立进程，故走 HTTP 而非内存写入；空值/null 视为清除。
+    **生效单号**在存在非空 ``server_value`` 时以服务器为准（轮询会清除手改）；否则采用 ``manual_value``。
+    """
+    data = order_number_state.set_server_value(body.order_number)
+    return Response(
+        success=True,
+        message="server 单号已更新",
+        data=data,
+    )
+
+
+@app.post("/api/order-number/production-end", response_model=Response, tags=["OrderNumber"])
+async def post_order_number_production_end():
+    """生产结束：清除 server / manual 单号，App 轮询后将显示「未获取」。
+
+    由 HY_Online 内部（自动控制 production-end 回调或 upload_client 模拟结束）调用；
+    与 HY_Server ``/device/{id}/production-end`` 配合使用。"""
+    data = order_number_state.clear_for_production_end()
+    return Response(
+        success=True,
+        message="生产已结束，单号显示已清除",
+        data=data,
+    )
+
+
+@app.post("/api/order-number/refresh", response_model=Response, tags=["OrderNumber"])
+async def post_order_number_refresh():
+    """按当前时间和生效单号重新创建/对齐目录（日切换或修复缺失目录用）。"""
+    folder = order_number_state.ensure_folder()
+    return Response(
+        success=True,
+        message="目录已对齐",
+        data={"folder": folder, **order_number_state.snapshot()},
     )
 
 #-------------------------------------------
@@ -1182,11 +1355,32 @@ async def get_cds350_spectrum(force_new: bool = False):
         status_info = spectrum_manager.get_status()
         cached_data = spectrum_manager.get_cached_data()
         data_timestamp = cached_data.timestamp if cached_data else None
-        
-        return Response(
-            success=True,
-            message="获取光谱数据成功",
-            data={
+
+        # 模拟模式：与 HY_APP 一致，仅返回固定网格上的强度（整数），不传 wavelengths
+        if app_config.is_mock_mode():
+            sp_list = [int(round(float(x))) for x in spectrum]
+            data = {
+                "spectrum": sp_list,
+                "length": len(sp_list),
+                "timestamp": (
+                    datetime.datetime.fromtimestamp(data_timestamp).isoformat()
+                    if data_timestamp
+                    else None
+                ),
+                "integration_time": cached_data.integration_time if cached_data else None,
+                "scans_to_average": cached_data.scans_to_average if cached_data else None,
+                "last_acquisition_time": (
+                    cached_data.acquisition_time if cached_data else None
+                ),
+                "dark_corrected": cached_data.dark_corrected if cached_data else False,
+                "dark_timestamp": cached_data.dark_timestamp if cached_data else None,
+                "smoothed": cached_data.smoothed if cached_data else False,
+                "smoothing_alpha": cached_data.smoothing_alpha if cached_data else None,
+                "dark_status": spectrum_manager.get_dark_status(),
+                "acquisition_status": status_info,
+            }
+        else:
+            data = {
                 "wavelengths": wavelengths,
                 "spectrum": spectrum,
                 "length": len(wavelengths) if wavelengths else 0,
@@ -1205,8 +1399,13 @@ async def get_cds350_spectrum(force_new: bool = False):
                 "smoothed": cached_data.smoothed if cached_data else False,
                 "smoothing_alpha": cached_data.smoothing_alpha if cached_data else None,
                 "dark_status": spectrum_manager.get_dark_status(),
-                "acquisition_status": status_info
+                "acquisition_status": status_info,
             }
+
+        return Response(
+            success=True,
+            message="获取光谱数据成功",
+            data=data,
         )
     except Exception as e:
         logger.error(f"获取光谱数据失败: {e}")
@@ -1285,22 +1484,25 @@ async def convert_to_spc(spectrum_data: SpectrumData):
     接收光谱数据（波长和强度），转换为SPC格式文件并返回文件信息
     """
     try:
-        # 验证数据长度
-        if len(spectrum_data.wavelengths) != len(spectrum_data.spectrum):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="波长数据和光谱数据长度不一致"
-            )
-        
-        if len(spectrum_data.wavelengths) == 0:
+        sp_len = len(spectrum_data.spectrum)
+        if sp_len == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="光谱数据不能为空"
             )
+        if spectrum_data.wavelengths is not None:
+            if len(spectrum_data.wavelengths) != sp_len:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="波长数据和光谱数据长度不一致"
+                )
+            wl = spectrum_data.wavelengths
+        else:
+            wl = [200.0 + i for i in range(sp_len)]
         
         # 转换为SPC文件
         result = convert_spectrum_to_spc(
-            wavelengths=spectrum_data.wavelengths,
+            wavelengths=wl,
             spectrum=spectrum_data.spectrum,
             output_path=spectrum_data.output_filename
         )
@@ -1401,15 +1603,11 @@ async def download_spc_file(filename: str):
                 detail="无效的文件名"
             )
         
-        # 在 HY_Online 临时 SPC 目录中查找文件；参比/暗光谱落在子目录中，也一并查找
-        from Devices.get_spc import SPC_OUTPUT_DIR, BLANK_SPC_OUTPUT_DIR, DARK_SPC_OUTPUT_DIR
-        file_path = os.path.join(SPC_OUTPUT_DIR, filename)
-        if not os.path.exists(file_path):
-            file_path = os.path.join(BLANK_SPC_OUTPUT_DIR, filename)
-        if not os.path.exists(file_path):
-            file_path = os.path.join(DARK_SPC_OUTPUT_DIR, filename)
+        from Devices.get_spc import find_spc_file_for_download
 
-        if not os.path.exists(file_path):
+        file_path = find_spc_file_for_download(filename)
+
+        if not file_path:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"文件未找到: {filename}"
@@ -1546,11 +1744,11 @@ async def convert_dark_to_spc(output_filename: Optional[str] = None):
         }
     else:
         try:
-            from Devices.get_spc import DARK_SPC_OUTPUT_DIR
+            from Devices.get_spc import get_dark_spc_dir
             output_path = output_filename
             if output_path is None:
                 ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(data.timestamp))
-                output_path = os.path.join(DARK_SPC_OUTPUT_DIR, f"dark_{ts_str}")
+                output_path = os.path.join(get_dark_spc_dir(), f"dark_{ts_str}")
             result = convert_spectrum_to_spc(
                 wavelengths=data.wavelengths,
                 spectrum=data.spectrum,

@@ -10,6 +10,18 @@
    - POST /api/upload-relay/set   — 单独设某路
 3. 默认主服务上两开关为**关**；本脚本在「全关」时只睡眠，不向上游 test1 推数据。
 
+真实模式（``DEVICE_MODE=real``）：生产结束由 HY_Online **自动控制停止** 触发 HY_Server ``production-end`` 并清除本机单号显示；本脚本不因「两路关」判定结束。
+
+模拟模式（非 real）：在本轮曾经打开过上传 relay、且**至少有一次**向 HY_Server 成功上报传感器或
+SPC（含暗/参比）之后，若连续 3 轮轮询均为「两路关」，则依次 POST HY_Server ``production-end``
+与主服务 ``/api/order-number/production-end``，并清空本地 ``current_batch`` 与工艺上送标志。
+（打开 relay 后若仅同步了单号快照、尚未成功上报任何数据，则**不会**计为已开始采集，避免误触发结束。）
+
+日志中「两路均为关」默认约每 20 轮全关才提示一次；触发生产结束前的若干轮会额外打出 ``已连续全关 x/3`` 便于核对计数。
+
+断网/进程重启：本进程将 current_batch 与工艺参数是否已上送写入 _upload_client_state.json，
+恢复后继续写入原单号目录（与 HY_Server 缓存一致依赖客户端重新上送工艺时可设 process_params_uploaded）。
+
 环境：DATA_SOURCE_BASE 为主服务，UPLOAD_BASE 为 test1 根地址。
 """
 from __future__ import annotations
@@ -27,6 +39,7 @@ from urllib import request
 
 from version import APP_VERSION
 import update_manager
+from order_number_state import PLACEHOLDER as _ORDER_PLACEHOLDER
 
 # ---- 日志配置：同时输出到终端和按日期滚动的日志文件 ----
 _LOG_DIR = Path(__file__).resolve().parent / "_logs"
@@ -56,7 +69,7 @@ BLANK_SPC_UPLOAD_URL = UPLOAD_BASE.rstrip("/") + "/spc/blank/upload"
 
 _RELAY_STATUS_PATH = "/api/upload-relay/status"
 
-# 传感器每轮固定上报字段（持续上报）
+# 传感器每轮固定上报字段（持续上报）；含 generation_batch 以便 App 手改/下发单号后 HY_Server 能更新归档目录
 _SNAPSHOT_KEYS = (
     "ddl",
     "ph",
@@ -72,6 +85,7 @@ _SNAPSHOT_KEYS = (
     "last_error",
     "running",
     "interval",
+    "generation_batch",
     # ---- 来自 hy_server.BridgeDataManager ----
     "temperature",
     "level",
@@ -80,7 +94,7 @@ _SNAPSHOT_KEYS = (
     "bridge_last_update_ts",
 )
 
-# 工艺/批次参数：仅在本进程首次成功上送时随载荷一并发出，之后由服务端按设备缓存补齐
+# 工艺参数：仅在本进程首次成功上送时随载荷一并发出（单号见上列 generation_batch，每轮都带）
 _PROCESS_KEYS = (
     "generation_batch",
     "fabric_weight_g",
@@ -93,20 +107,28 @@ _PROCESS_KEYS = (
     "bath_ratio",
 )
 
-DEVICE_ID = "device_002"
+DEVICE_ID = os.getenv("HY_ONLINE_DEVICE_ID", "device_002").strip() or "device_002"
 RELAY_POLL_INTERVAL_SEC = 1.0
 SENSOR_UPLOAD_INTERVAL_SEC = float(os.getenv("SENSOR_UPLOAD_INTERVAL_SEC", "2"))
-DEFAULT_SPC_UPLOAD_INTERVAL_SEC = float(os.getenv("SPC_UPLOAD_INTERVAL_SEC", "5"))
+DEFAULT_SPC_UPLOAD_INTERVAL_SEC = float(os.getenv("SPC_UPLOAD_INTERVAL_SEC", "60"))
 # 参比光谱检查间隔：每隔多少秒向主服务查询一次参比光谱状态；
 # 实际上传由时间戳去重控制，只在采集到新数据后才推送。
 BLANK_SPC_CHECK_INTERVAL_SEC = 30.0
 HTTP_TIMEOUT_SEC = 15.0
 # 软件更新检查间隔（秒）；启动时立即检查一次，之后按此间隔周期检查
 UPDATE_CHECK_INTERVAL_SEC = 3600.0
+# 单号拉取：每隔多少秒向 test1 查询一次该设备的当前单号，并将结果写入主服务。
+ORDER_NUMBER_POLL_INTERVAL_SEC = float(
+    os.getenv("ORDER_NUMBER_POLL_INTERVAL_SEC", "60")
+)
 
 # 在「全关」时每隔多少轮打印一次说明（避免刷屏）
 _IDLE_LOG_EVERY = 20
 _idle_streak = 0
+# 模拟模式下连续多少轮「两路关」视为生产结束（通知 production-end）
+_MOCK_RELAY_IDLE_END_COUNT = int(os.getenv("MOCK_RELAY_IDLE_END_COUNT", "3"))
+
+_UPLOAD_CLIENT_STATE_PATH = Path(__file__).resolve().parent / "_upload_client_state.json"
 
 _BLANK_TYPES = ("blank_before", "blank_after")
 
@@ -155,25 +177,32 @@ def fetch_sensor_snapshot(base: str) -> Dict[str, Any]:
 
 def extract_batch_from_snapshot(snapshot: Dict[str, Any]) -> Optional[str]:
     batch = str(snapshot.get("generation_batch") or "").strip()
-    return batch or None
+    if not batch or batch == _ORDER_PLACEHOLDER:
+        return None
+    return batch
 
 
 def ensure_current_batch(current_batch: Optional[str]) -> Optional[str]:
     """
-    任一上传通道打开时都先读取一次传感器快照。
-    模拟模式下这会触发/读取进程内唯一的 generation_batch；
-    后打开的通道复用 current_batch，不再重新生成。
+    任一路打开时根据传感器快照同步本进程锁定的单号。
+    App 手动改单号 / 服务器下发后，快照中的 generation_batch 会变，须重新拉取
+    （旧逻辑在 current_batch 非空时直接返回，会导致 SPC 上传仍用旧单号、服务端目录不迁）。
     """
-    if current_batch:
-        return current_batch
     try:
         snapshot = fetch_sensor_snapshot(DATA_SOURCE_BASE)
         batch = extract_batch_from_snapshot(snapshot)
-        if batch:
-            logger.info("当前批次已锁定: %s", batch)
-            return batch
+        if not batch:
+            if current_batch is not None:
+                logger.info(
+                    "单号快照已为占位/空，解除本进程锁定（曾锁定=%r）",
+                    current_batch,
+                )
+            return None
+        if batch != current_batch:
+            logger.info("当前单号已同步: %r -> %r", current_batch, batch)
+        return batch
     except Exception as e:
-        logger.warning("读取当前批次失败，后续由服务端兜底: %s", e)
+        logger.warning("读取当前单号失败，沿用本进程锁定: %s", e)
     return current_batch
 
 
@@ -212,10 +241,17 @@ def build_device_payload(
 ) -> Dict[str, Any]:
     out: Dict[str, Any] = {"device_id": device_id}
     for k in _SNAPSHOT_KEYS:
-        if k in snapshot:
-            out[k] = snapshot[k]
+        if k not in snapshot:
+            continue
+        if k == "generation_batch":
+            ts = str(snapshot[k]).strip()
+            if not ts or ts == _ORDER_PLACEHOLDER:
+                continue
+        out[k] = snapshot[k]
     if include_process:
         for k in _PROCESS_KEYS:
+            if k == "generation_batch":
+                continue
             v = snapshot.get(k)
             if v is not None:
                 out[k] = v
@@ -366,23 +402,135 @@ def fetch_dark_spc(base: str) -> tuple[str, bytes, float]:
     return file_name, spc_bytes, source_timestamp
 
 
+def fetch_server_order_number(upload_base: str, device_id: str) -> Optional[str]:
+    """从 HY_Server 拉取该设备当前单号；服务端不可达或字段缺失时返回 None。"""
+    url = upload_base.rstrip("/") + "/device/" + parse.quote(device_id, safe="") + "/order_number"
+    try:
+        req = request.Request(url, method="GET")
+        with request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except (urlerror.URLError, OSError, json.JSONDecodeError) as e:
+        logger.warning("拉取单号失败 device=%s: %s", device_id, e)
+        return None
+    if not isinstance(body, dict):
+        return None
+    raw = body.get("order_number")
+    if raw is None:
+        return ""  # 服务端显式无值；返回空串以便区分「拉取失败」与「确认清除」
+    text = str(raw).strip()
+    return text
+
+
+def push_server_order_number_to_local(data_source_base: str, value: Optional[str]) -> None:
+    """将 server 下发的单号写入主服务（HY_Online），由其更新 order_number_state。
+
+    value=None 表示本轮拉取失败，跳过；空串表示服务端确认清除。
+    """
+    if value is None:
+        return
+    url = data_source_base.rstrip("/") + "/api/order-number/server"
+    payload = json.dumps({"order_number": value or None}, ensure_ascii=False).encode("utf-8")
+    req = request.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
+            resp.read()
+    except (urlerror.URLError, OSError) as e:
+        logger.warning("写入本地单号状态失败: %s", e)
+
+
+def load_upload_client_state() -> tuple[Optional[str], bool]:
+    """恢复上次锁定的单号与工艺上送标志，便于中断后续传同一单号。"""
+    if not _UPLOAD_CLIENT_STATE_PATH.is_file():
+        return None, False
+    try:
+        with open(_UPLOAD_CLIENT_STATE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("读取 upload_client 状态失败 %s: %s", _UPLOAD_CLIENT_STATE_PATH, e)
+        return None, False
+    if not isinstance(data, dict):
+        return None, False
+    b = data.get("current_batch")
+    batch = str(b).strip() if b is not None and str(b).strip() else None
+    proc = bool(data.get("process_params_uploaded"))
+    return batch, proc
+
+
+def save_upload_client_state(current_batch: Optional[str], process_params_uploaded: bool) -> None:
+    tmp = _UPLOAD_CLIENT_STATE_PATH.with_suffix(".json.tmp")
+    payload = {
+        "current_batch": current_batch,
+        "process_params_uploaded": process_params_uploaded,
+    }
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _UPLOAD_CLIENT_STATE_PATH)
+    except OSError as e:
+        logger.warning("写入 upload_client 状态失败 %s: %s", _UPLOAD_CLIENT_STATE_PATH, e)
+
+
+def post_local_production_end(data_source_base: str) -> bool:
+    """通知主服务清除 App 侧单号显示（与 HY_Server production-end 配套）。"""
+    url = data_source_base.rstrip("/") + "/api/order-number/production-end"
+    req = request.Request(url, data=b"", method="POST")
+    try:
+        with request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
+            if resp.status != 200:
+                logger.warning("production-end 本机单号清除 HTTP %s", resp.status)
+                return False
+            return True
+    except (urlerror.URLError, OSError) as e:
+        logger.warning("production-end 本机单号清除失败: %s", e)
+        return False
+
+
+def post_production_end(upload_base: str, device_id: str) -> bool:
+    """通知 HY_Server 清除工艺缓存中的单号（本锅结束）。"""
+    url = (
+        upload_base.rstrip("/")
+        + "/device/"
+        + parse.quote(device_id, safe="")
+        + "/production-end"
+    )
+    req = request.Request(url, data=b"", method="POST")
+    try:
+        with request.urlopen(req, timeout=HTTP_TIMEOUT_SEC) as resp:
+            if resp.status != 200:
+                logger.warning("production-end HTTP %s", resp.status)
+                return False
+            return True
+    except (urlerror.URLError, OSError) as e:
+        logger.warning("production-end 请求失败: %s", e)
+        return False
+
+
 def send_sensor_once(include_process: bool = False) -> tuple[bool, Optional[str]]:
-    """发送一次传感器载荷。返回 (是否携带工艺参数, 当前批次)。"""
+    """发送一次传感器载荷。返回 (是否携带工艺参数, 当前单号)。"""
     snapshot = fetch_sensor_snapshot(DATA_SOURCE_BASE)
     payload = build_device_payload(
         DEVICE_ID, snapshot, include_process=include_process
     )
     sensor_raw = post_upload(UPLOAD_URL, payload)
     sent_process = include_process and any(k in payload for k in _PROCESS_KEYS)
-    batch = extract_batch_from_snapshot(snapshot) or str(
+    raw_batch = extract_batch_from_snapshot(snapshot) or str(
         payload.get("generation_batch") or ""
     ).strip()
+    if raw_batch and raw_batch != _ORDER_PLACEHOLDER:
+        batch: Optional[str] = raw_batch
+    else:
+        batch = None
     logger.info(
         "sensor 上传响应: %s%s",
         sensor_raw,
         "（含工艺参数，本进程仅此一次）" if sent_process else "",
     )
-    return sent_process, (batch or None)
+    return sent_process, batch
 
 
 def send_spc_once(batch: Optional[str] = None) -> None:
@@ -408,8 +556,11 @@ if __name__ == "__main__":
 
     last_sensor_upload_at: Optional[float] = None
     last_spc_upload_at: Optional[float] = None
-    process_params_uploaded: bool = False
-    current_batch: Optional[str] = None
+    loaded_batch, loaded_proc = load_upload_client_state()
+    process_params_uploaded: bool = loaded_proc
+    current_batch: Optional[str] = loaded_batch
+    if current_batch is not None:
+        logger.info("已从状态文件恢复生产单号锁定: %s", current_batch)
     spc_upload_interval_sec: float = DEFAULT_SPC_UPLOAD_INTERVAL_SEC
     # 参比光谱：记录上次检查时刻（wall clock）与上次已上传的 source_timestamp（去重）
     last_blank_check_at: Optional[float] = None
@@ -417,10 +568,31 @@ if __name__ == "__main__":
     last_dark_spc_ts: float = 0.0
     # 上次软件更新检查时刻（monotonic）；启动时已检查过，故初始化为当前时刻
     last_update_check_at: float = time.monotonic()
+    # 单号轮询：与上传开关无关，独立按间隔从 HY_Server 拉取；
+    # 仅在变化时同步到主服务，避免在 _logs 中刷屏。
+    last_order_poll_at: float = 0.0
+    last_pushed_order_value: Optional[str] = None  # None=尚未推送任何值；"" 与具体单号都属于已知状态
+    # 本轮是否曾打开过上传 relay（模拟模式下「两路关×3」结束需曾进入过上传过程）
+    relay_ever_active_this_session = False
+    # 本轮是否已向 HY_Server 成功上报过传感器/SPC 等数据（仅凭 relay 曾开不足以触发 production-end）
+    mock_had_server_upload_this_session = False
 
     while True:
         try:
             now = time.monotonic()
+            device_mode = os.getenv("DEVICE_MODE", "mock").lower()
+
+            # ---- 定期单号拉取（与上传开关无关，始终执行）----
+            if now - last_order_poll_at >= ORDER_NUMBER_POLL_INTERVAL_SEC:
+                last_order_poll_at = now
+                order_val = fetch_server_order_number(UPLOAD_BASE, DEVICE_ID)
+                if order_val is not None and order_val != last_pushed_order_value:
+                    push_server_order_number_to_local(DATA_SOURCE_BASE, order_val)
+                    last_pushed_order_value = order_val
+                    logger.info(
+                        "server 单号已同步到本地: %r",
+                        order_val if order_val else "(空，清除)",
+                    )
 
             # ---- 定期软件更新检查（与上传开关状态无关，始终执行）----
             if now - last_update_check_at >= UPDATE_CHECK_INTERVAL_SEC:
@@ -436,6 +608,9 @@ if __name__ == "__main__":
                 continue
             us, up, spc_upload_interval_sec = flags
 
+            if us or up:
+                relay_ever_active_this_session = True
+
             if not us:
                 last_sensor_upload_at = None
             if not up:
@@ -445,7 +620,45 @@ if __name__ == "__main__":
             if not us and not up:
                 _idle_streak += 1
                 if _idle_streak % _IDLE_LOG_EVERY == 1:
-                    logger.info("两路均为关（请 POST 主服务 /api/upload-relay/start），不向上报…")
+                    logger.info(
+                        "两路均为关（请 POST 主服务 /api/upload-relay/start），不向上报…"
+                        "  （约每 %s 轮提示一次；触发生产结束前会另行打印全关计数）",
+                        _IDLE_LOG_EVERY,
+                    )
+                if (
+                    device_mode != "real"
+                    and relay_ever_active_this_session
+                    and mock_had_server_upload_this_session
+                    and _idle_streak <= _MOCK_RELAY_IDLE_END_COUNT
+                ):
+                    logger.info(
+                        "模拟模式：两路均为关，已连续全关 %s/%s 轮（仅统计「已成功上报」之后的全关轮次）",
+                        _idle_streak,
+                        _MOCK_RELAY_IDLE_END_COUNT,
+                    )
+                if (
+                    device_mode != "real"
+                    and relay_ever_active_this_session
+                    and mock_had_server_upload_this_session
+                    and _idle_streak >= _MOCK_RELAY_IDLE_END_COUNT
+                ):
+                    if post_production_end(UPLOAD_BASE, DEVICE_ID):
+                        post_local_production_end(DATA_SOURCE_BASE)
+                        logger.info(
+                            "模拟模式：已连续 %s 轮两路关（先成功上报再计数），已通知服务端与主服务生产结束并清除本地单号锁定",
+                            _MOCK_RELAY_IDLE_END_COUNT,
+                        )
+                        current_batch = None
+                        process_params_uploaded = False
+                        save_upload_client_state(None, False)
+                        _idle_streak = 0
+                        relay_ever_active_this_session = False
+                        mock_had_server_upload_this_session = False
+                    else:
+                        logger.warning(
+                            "模拟模式：已连续 %s 轮两路关，但 production-end 通知失败，保留本地单号锁定",
+                            _MOCK_RELAY_IDLE_END_COUNT,
+                        )
                 time.sleep(RELAY_POLL_INTERVAL_SEC)
                 continue
 
@@ -465,6 +678,9 @@ if __name__ == "__main__":
                 last_sensor_upload_at = time.monotonic()
                 if sent_process:
                     process_params_uploaded = True
+                if device_mode != "real":
+                    mock_had_server_upload_this_session = True
+                save_upload_client_state(current_batch, process_params_uploaded)
 
             if up and (
                 last_spc_upload_at is None
@@ -473,6 +689,8 @@ if __name__ == "__main__":
                 try:
                     send_spc_once(batch=current_batch)
                     last_spc_upload_at = time.monotonic()
+                    if device_mode != "real":
+                        mock_had_server_upload_this_session = True
                 except Exception as e:
                     logger.error("SPC 步骤失败（传感器可能已上传）: %s", e)
 
@@ -494,6 +712,8 @@ if __name__ == "__main__":
                         )
                         last_dark_spc_ts = dts
                         logger.info("dark_spc 上传响应: %s", dspc_raw)
+                        if device_mode != "real":
+                            mock_had_server_upload_this_session = True
                 except urlerror.HTTPError as e:
                     if e.code != 404:
                         logger.error(
@@ -520,6 +740,8 @@ if __name__ == "__main__":
                             )
                             last_blank_spc_ts[blank_type] = bts
                             logger.info("blank_spc [%s] 上传响应: %s", blank_type, bspc_raw)
+                            if device_mode != "real":
+                                mock_had_server_upload_this_session = True
                     except urlerror.HTTPError as e:
                         if e.code != 404:
                             logger.error(

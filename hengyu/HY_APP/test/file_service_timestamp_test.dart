@@ -33,18 +33,19 @@ void main() {
     test('should use current system time for spectrum data saving', () async {
       // Create test spectrum data with old timestamp
       final oldTimestamp = DateTime(2023, 1, 1, 12, 0, 0);
-      final spectrumData = SpectrumData(
+      final spectrumData = SpectrumData.fromRawAcquisition(
         wavelengths: [400.0, 500.0, 600.0],
         intensities: [1000, 2000, 1500],
         timestamp: oldTimestamp,
-        length: 3,
         integrationTime: 10000,
         scansToAverage: 3,
       );
 
       // Verify the logic: spectrum data should use current time for file naming and CSV content
       expect(spectrumData.timestamp, equals(oldTimestamp));
-      
+      expect(spectrumData.intensities.length,
+          SpectrumData.acquisitionChannelCount);
+
       print('测试光谱数据时间戳优化');
       print('原始光谱时间戳: ${spectrumData.timestamp}');
       print('当前系统时间: ${DateTime.now()}');

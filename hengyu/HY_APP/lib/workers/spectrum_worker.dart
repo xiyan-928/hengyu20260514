@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:isolate';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import '../models/spectrum_data.dart';
 import '../services/isolate_service.dart';
 
 /// 光谱数据采集isolate工作函数
@@ -172,18 +173,41 @@ Future<void> _collectSpectrum(http.Client client, String baseUrl, SendPort sendP
       if (data is Map && data.containsKey('success') && data['success'] == true) {
         final spectrumData = data['data'];
         if (spectrumData is Map) {
-          final wavelengths = spectrumData['wavelengths'] as List<dynamic>?;
-          final intensities = spectrumData['spectrum'] as List<dynamic>?; // 注意：API字段名是'spectrum'，不是'intensities'
+          final wavelengthsRaw = spectrumData['wavelengths'] as List<dynamic>?;
+          final intensitiesRaw = spectrumData['spectrum'] as List<dynamic>?; // API 字段名是 spectrum
           final acquisitionStatus = spectrumData['acquisition_status'] as Map<String, dynamic>?;
           final lastAcquisitionTime = acquisitionStatus?['last_acquisition_time'] as num?;
-          
-          print('🔥 Spectrum data structure: wavelengths=${wavelengths?.length ?? 0}, intensities=${intensities?.length ?? 0}, lastAcquisitionTime=${lastAcquisitionTime}');
-          
+
+          if (intensitiesRaw == null || intensitiesRaw.isEmpty) {
+            sendPort.send({
+              'type': 'error',
+              'message': 'Spectrum response missing spectrum array',
+            });
+            return;
+          }
+
+          final intensities =
+              intensitiesRaw.map((e) => (e as num).toDouble()).toList();
+          List<double> wavelengths;
+          if (wavelengthsRaw != null && wavelengthsRaw.isNotEmpty) {
+            wavelengths =
+                wavelengthsRaw.map((e) => (e as num).toDouble()).toList();
+          } else {
+            // 与模拟 API / 固定网格一致：200..200+n-1 nm
+            wavelengths = List<double>.generate(
+              intensities.length,
+              (i) => (SpectrumData.acquisitionWavelengthMinNm + i).toDouble(),
+            );
+          }
+
+          print(
+              '🔥 Spectrum data structure: wavelengths=${wavelengths.length}, intensities=${intensities.length}, lastAcquisitionTime=${lastAcquisitionTime}');
+
           sendPort.send({
             'type': 'spectrum_data',
             'timestamp': DateTime.now().toIso8601String(),
-            'wavelengths': wavelengths?.map((e) => (e as num).toDouble()).toList() ?? [],
-            'intensities': intensities?.map((e) => (e as num).toDouble()).toList() ?? [],
+            'wavelengths': wavelengths,
+            'intensities': intensities,
             'lastAcquisitionTime': lastAcquisitionTime?.toDouble(),
             'acquisitionStatus': acquisitionStatus,
           });

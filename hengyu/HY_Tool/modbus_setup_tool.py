@@ -257,6 +257,7 @@ def decode_registers(registers: List[int], scheme: str) -> Any:
     - ``u32_div1000`` : u32_be / 1000
     - ``r0_div10``    : reg0 / 10
     - ``r0_div100``   : reg0 / 100
+    - ``r0_minus40``  : reg0 - 40
     - ``bits``        : 每个寄存器最低位取布尔
     """
     if scheme == "raw":
@@ -285,6 +286,8 @@ def decode_registers(registers: List[int], scheme: str) -> Any:
         return int(registers[0]) / 10.0
     if scheme == "r0_div100":
         return int(registers[0]) / 100.0
+    if scheme == "r0_minus40":
+        return int(registers[0]) - 40
     if scheme == "bits":
         return [bool(int(r) & 1) for r in registers]
     return list(registers)

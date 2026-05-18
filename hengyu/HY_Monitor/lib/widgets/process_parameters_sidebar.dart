@@ -9,10 +9,14 @@ class ProcessParametersSidebar extends StatelessWidget {
     super.key,
     required this.provider,
     this.data,
+    this.batchCountKind = BatchSidebarCountKind.sensor,
   });
 
   final DeviceDetailProvider provider;
   final DeviceData? data;
+
+  /// 生成单号下拉项中「条数」的含义（历史 / SPC / 参比页各不相同）。
+  final BatchSidebarCountKind batchCountKind;
 
   @override
   Widget build(BuildContext context) {
@@ -40,12 +44,15 @@ class ProcessParametersSidebar extends StatelessWidget {
               Text(
                 provider.selectedBatch == null
                     ? '来自最新样本'
-                    : '来自批次 ${provider.selectedBatch}',
+                    : '来自单号 ${provider.selectedBatch}',
                 style: theme.textTheme.labelSmall
                     ?.copyWith(color: theme.colorScheme.outline),
               ),
               const SizedBox(height: 10),
-              _BatchSelector(provider: provider),
+              _BatchSelector(
+                provider: provider,
+                batchCountKind: batchCountKind,
+              ),
               const SizedBox(height: 8),
               _metaRow(theme, '布重 (g)', _numOrDash(
                 data?.fabricWeightG ?? batch?.fabricWeightG,
@@ -129,9 +136,13 @@ class ProcessParametersSidebar extends StatelessWidget {
 }
 
 class _BatchSelector extends StatelessWidget {
-  const _BatchSelector({required this.provider});
+  const _BatchSelector({
+    required this.provider,
+    required this.batchCountKind,
+  });
 
   final DeviceDetailProvider provider;
+  final BatchSidebarCountKind batchCountKind;
 
   @override
   Widget build(BuildContext context) {
@@ -146,7 +157,7 @@ class _BatchSelector extends StatelessWidget {
         children: [
           Flexible(
             child: Text(
-              '${b.displayLabel} · ${b.count} 条',
+              '${b.displayLabel} · ${b.countForSidebar(batchCountKind)} 条',
               overflow: TextOverflow.ellipsis,
               style: isLatest
                   ? TextStyle(
@@ -196,7 +207,7 @@ class _BatchSelector extends StatelessWidget {
           children: [
             Expanded(
               child: Text(
-                '生成批次',
+                '生成单号',
                 style: TextStyle(color: theme.colorScheme.outline),
               ),
             ),
@@ -246,8 +257,8 @@ class _BatchSelector extends StatelessWidget {
                     },
               hint: Text(
                 latestBatchId == null
-                    ? '尚无批次记录'
-                    : '最新批次（正在采集）',
+                    ? '尚无单号记录'
+                    : '最新单号（正在采集）',
               ),
             ),
           ),
@@ -264,7 +275,7 @@ class _BatchSelector extends StatelessWidget {
                 ),
                 const SizedBox(width: 6),
                 Text(
-                  '加载批次列表...',
+                  '加载单号列表...',
                   style: theme.textTheme.labelSmall
                       ?.copyWith(color: theme.colorScheme.outline),
                 ),
@@ -275,7 +286,7 @@ class _BatchSelector extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 4),
             child: Text(
-              '批次列表加载失败',
+              '单号列表加载失败',
               style: theme.textTheme.labelSmall
                   ?.copyWith(color: theme.colorScheme.error),
             ),

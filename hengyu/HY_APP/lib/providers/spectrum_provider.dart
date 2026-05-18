@@ -154,7 +154,7 @@ class SpectrumProvider with ChangeNotifier {
     _scansToAverage = await _settingsService.getScansToAverage();
     final queryIntervalSeconds = await _settingsService.getSpectrumQueryInterval();
     _collectionInterval = queryIntervalSeconds * 1000; // Convert to milliseconds
-    await _apiService.updateSpectrumQueryInterval(queryIntervalSeconds);
+    // 上传 / upload_client 的 SPC 间隔由 HY_Online device_config 决定，不由本机构 App 设置覆盖。
   }
 
   Future<SpectrumFileFormat> _getSpectrumSaveFormat() async {
@@ -181,7 +181,7 @@ class SpectrumProvider with ChangeNotifier {
 
   /// 更新当前光谱数据（用于在线分析）
   void updateCurrentSpectrum(SpectrumData spectrumData) {
-    _currentSpectrum = spectrumData;
+    _currentSpectrum = spectrumData.withNormalizedAcquisitionSeries();
     notifyListeners();
   }
 
@@ -374,19 +374,27 @@ class SpectrumProvider with ChangeNotifier {
   void _processSpectrumDataFromIsolate(Map<String, dynamic> message) async {
     try {
       print('🔥 Processing spectrum data: ${message['wavelengths']?.length ?? 0} wavelengths, ${message['intensities']?.length ?? 0} intensities');
-      final wavelengths = List<double>.from(message['wavelengths'] ?? []);
+      var wavelengths = List<double>.from(message['wavelengths'] ?? []);
       final intensities = List<double>.from(message['intensities'] ?? []);
       final timestamp = message['timestamp'] as String?;
       final lastAcquisitionTime = message['lastAcquisitionTime'] as double?;
       final acquisitionStatus = message['acquisitionStatus'] as Map<String, dynamic>?;
-      
+
+      if (wavelengths.isEmpty && intensities.isNotEmpty) {
+        wavelengths = List<double>.generate(
+          intensities.length,
+          (i) => (SpectrumData.acquisitionWavelengthMinNm + i).toDouble(),
+        );
+      }
+
       if (wavelengths.isNotEmpty && intensities.isNotEmpty) {
         print('🔥 Creating spectrum data with ${wavelengths.length} points');
-        _currentSpectrum = SpectrumData(
+        final rawIntensities = intensities.map((e) => e.toInt()).toList();
+        _currentSpectrum = SpectrumData.fromRawAcquisition(
           wavelengths: wavelengths,
-          intensities: intensities.map((e) => e.toInt()).toList(),
-          timestamp: timestamp != null ? DateTime.parse(timestamp) : DateTime.now(),
-          length: wavelengths.length,
+          intensities: rawIntensities,
+          timestamp:
+              timestamp != null ? DateTime.parse(timestamp) : DateTime.now(),
           integrationTime: _integrationTime,
           scansToAverage: _scansToAverage,
           lastAcquisitionTime: lastAcquisitionTime,
@@ -506,7 +514,8 @@ class SpectrumProvider with ChangeNotifier {
       final response = await _apiService.getSpectrumData();
       
       if (response.success && response.data != null) {
-        _currentSpectrum = response.data!;
+        _currentSpectrum =
+            response.data!.withNormalizedAcquisitionSeries();
         
         print('🔍 [Provider Debug] Received spectrum data:');
         print('  - lastAcquisitionTime: ${_currentSpectrum!.lastAcquisitionTime}');

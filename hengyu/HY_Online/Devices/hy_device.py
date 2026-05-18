@@ -226,7 +226,7 @@ class SensorDataManager:
 
         materials = ("涤纶", "棉", "尼龙", "混纺", "羊毛")
         self._mock_process_params = {
-            "generation_batch": f"MOCK-{random.randint(20250001, 20259999)}",
+            # generation_batch：每次快照取自 order_number_state 当前生效单号（见 get_snapshot）
             "fabric_weight_g": round(random.uniform(800.0, 3500.0), 2),
             "fabric_length": round(random.uniform(50.0, 200.0), 2),
             "fabric_width": round(random.uniform(1.0, 3.5), 3),
@@ -237,8 +237,7 @@ class SensorDataManager:
             "bath_ratio": round(random.uniform(5.0, 15.0), 2),
         }
         logger.info(
-            "模拟模式：工艺参数已生成（单次） batch=%s material=%s",
-            self._mock_process_params.get("generation_batch"),
+            "模拟模式：工艺参数已生成（单次，单号沿用 order_number_state） material=%s",
             self._mock_process_params.get("fabric_material"),
         )
 
@@ -376,6 +375,17 @@ class SensorDataManager:
         }
         if self._mock_process_params:
             snap.update(self._mock_process_params)
+        try:
+            try:
+                from .. import order_number_state as _ons
+            except ImportError:
+                from HY_Online import order_number_state as _ons
+
+            eff = _ons.snapshot().get("effective")
+            gb = str(eff).strip() if eff else ""
+            snap["generation_batch"] = gb if gb else _ons.PLACEHOLDER
+        except Exception:
+            snap.setdefault("generation_batch", "未获取")
         return snap
 
     def _set_values(self, ddl: float, ph: float, ph_temp: float, pt100: float) -> None:

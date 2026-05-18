@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:provider/provider.dart';
 
+import '../models/batch_info.dart';
 import '../models/spc_file_info.dart';
 import '../models/spectrum_data.dart';
 import '../providers/device_detail_provider.dart';
@@ -56,6 +57,14 @@ class _BlankSpcScreenState extends State<BlankSpcScreen> {
       await p.ensureBatchSelected();
       if (!mounted) return;
       await p.refreshBlankSpcFiles();
+      if (!mounted) return;
+      for (final type in ['blank_before', 'blank_after']) {
+        final files = p.blankSpcFiles[type];
+        if (files != null && files.isNotEmpty) {
+          await _showPlot(type, files.last);
+          if (!mounted) return;
+        }
+      }
     });
   }
 
@@ -149,6 +158,7 @@ class _BlankSpcScreenState extends State<BlankSpcScreen> {
         final sidebar = ProcessParametersSidebar(
           provider: p,
           data: metaSource,
+          batchCountKind: BatchSidebarCountKind.blankReference,
         );
         final content = Column(
           children: [

@@ -7,6 +7,11 @@ from typing import Tuple, List
 
 from .CDS350_API import _CDS350SingletonBase
 
+# 与 HY_APP SpectrumData 固定网格一致：整数 nm，含端点，共 901 点。
+ACQUISITION_WAVELENGTH_MIN_NM = 200
+ACQUISITION_WAVELENGTH_MAX_NM = 1100
+ACQUISITION_CHANNEL_COUNT = ACQUISITION_WAVELENGTH_MAX_NM - ACQUISITION_WAVELENGTH_MIN_NM + 1
+
 
 class CDS350_Mock(_CDS350SingletonBase):
     """CDS350光谱仪模拟类 - 用于无硬件环境下的调试。进程内单例。"""
@@ -37,14 +42,16 @@ class CDS350_Mock(_CDS350SingletonBase):
         self._cds350_singleton_ready = True
 
     def _generate_mock_spectrum(self) -> Tuple[List[float], List[int]]:
-        """生成模拟光谱数据"""
-        # 生成波长范围 200-1100nm (CDS350典型范围)
-        wavelengths = np.linspace(200, 1100, 2048).tolist()
-        
-        # 生成模拟光谱强度
-        # 使用多个高斯峰来模拟真实光谱
-        x = np.array(wavelengths)
-        intensity = np.zeros_like(x)
+        """生成模拟光谱：固定 200..1100 nm 整数网格（901 点），强度为整数。"""
+        wavelengths = np.arange(
+            ACQUISITION_WAVELENGTH_MIN_NM,
+            ACQUISITION_WAVELENGTH_MAX_NM + 1,
+            dtype=np.float64,
+        )
+        assert wavelengths.size == ACQUISITION_CHANNEL_COUNT
+
+        x = wavelengths
+        intensity = np.zeros_like(x, dtype=np.float64)
         
         # 添加几个特征峰
         peaks = [
@@ -65,10 +72,8 @@ class CDS350_Mock(_CDS350SingletonBase):
         
         intensity = intensity + baseline + noise
         
-        # 确保强度为正值且在合理范围内
-        intensity = np.clip(intensity, 100, 65000).astype(int).tolist()
-        
-        return wavelengths, intensity
+        intensity = np.clip(intensity, 100, 65000).astype(np.int64)
+        return wavelengths.tolist(), intensity.astype(int).tolist()
 
     def initialize_device(self) -> dict:
         """模拟初始化设备并打开第一个USB设备"""
@@ -156,7 +161,7 @@ class CDS350_Mock(_CDS350SingletonBase):
         return self.scans_to_average
 
     def read_spectrum(self) -> Tuple[np.ndarray, np.ndarray]:
-        """模拟读取波长和光谱数据（与真机一致返回 float64 ndarray）"""
+        """模拟读取光谱：901 点固定网格，强度为 float64 但取整数值（与 App 网格一致）。"""
         if self.handle.value == -1:
             raise RuntimeError("设备尚未初始化。")
         
@@ -180,10 +185,14 @@ class CDS350_Mock(_CDS350SingletonBase):
         
         # 添加设备参数相关的噪声
         noise = np.random.normal(0, noise_level, len(spectrum))
-        spectrum = np.array(spectrum) + noise
-        spectrum = np.clip(spectrum, 50, 65000).astype(np.float64)
+        spectrum = np.rint(np.array(spectrum, dtype=np.float64) + noise)
+        spectrum = np.clip(spectrum, 50, 65000).astype(np.int64).astype(np.float64)
 
-        print(f"✅ CDS350光谱采集完成 - 数据点数: {len(wavelengths)}, 采集时间: {actual_time:.2f}s")
+        print(
+            f"✅ CDS350光谱采集完成 - 数据点数: {len(wavelengths)} "
+            f"（网格 {ACQUISITION_WAVELENGTH_MIN_NM}-{ACQUISITION_WAVELENGTH_MAX_NM} nm）, "
+            f"采集时间: {actual_time:.2f}s"
+        )
 
         return np.asarray(wavelengths, dtype=np.float64), spectrum
 
@@ -204,37 +213,31 @@ if __name__ == "__main__":
     # 测试模拟CDS350设备
     print("🧪 测试CDS350模拟设备")
     print("=" * 50)
-    
+
+    cds350 = CDS350_Mock()
     try:
-        # 创建设备实例
-        cds350 = CDS350_Mock()
-        
-        # 初始化设备
-        integration_time, scans_to_average = cds350.initialize_device()
-        
-        # 测试参数设置
+        init_info = cds350.initialize_device()
+
         cds350.set_integration_time(30000)
         cds350.set_scans_to_average(5)
-        
+
         print(f"\n当前设备参数:")
         print(f"积分时间: {cds350.get_integration_time()}μs")
         print(f"平均次数: {cds350.get_scans_to_average()}")
-        
-        # 测试光谱采集
+        print(f"初始化信息: {init_info}")
+
         print(f"\n开始光谱采集测试...")
         wavelengths, spectrum = cds350.read_spectrum()
-        
+
         print(f"光谱数据统计:")
-        print(f"- 波长范围: {min(wavelengths):.1f} - {max(wavelengths):.1f} nm")
-        print(f"- 强度范围: {min(spectrum)} - {max(spectrum)}")
-        print(f"- 平均强度: {np.mean(spectrum):.1f}")
-        
-        # 关闭设备
+        print(f"- 数据点数: {len(wavelengths)} (期望 {ACQUISITION_CHANNEL_COUNT})")
+        print(f"- 波长范围: {float(np.min(wavelengths)):.1f} - {float(np.max(wavelengths)):.1f} nm")
+        print(f"- 强度范围: {float(np.min(spectrum))} - {float(np.max(spectrum))}")
+        print(f"- 平均强度: {float(np.mean(spectrum)):.1f}")
+
         cds350.close_device()
-        
+
         print("\n✅ CDS350模拟设备测试完成")
-        
+
     except Exception as e:
         print(f"❌ 测试失败: {e}")
-    finally:
-        del cds350

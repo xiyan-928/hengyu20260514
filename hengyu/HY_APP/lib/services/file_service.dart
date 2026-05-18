@@ -226,9 +226,8 @@ class FileService {
           // Create updated spectrum data with current system timestamp
           final updatedSpectrumData = SpectrumData(
             timestamp: currentTime, // Use current frontend time
-            wavelengths: spectrumData.wavelengths,
             intensities: spectrumData.intensities,
-            length: spectrumData.wavelengths.length,
+            length: spectrumData.intensities.length,
             integrationTime: spectrumData.integrationTime,
             scansToAverage: spectrumData.scansToAverage,
           );
@@ -245,9 +244,8 @@ class FileService {
           // Create updated spectrum data with current system timestamp for SPC saving
           final updatedSpectrumData = SpectrumData(
             timestamp: currentTime, // Use current frontend time
-            wavelengths: spectrumData.wavelengths,
             intensities: spectrumData.intensities,
-            length: spectrumData.wavelengths.length,
+            length: spectrumData.intensities.length,
             integrationTime: spectrumData.integrationTime,
             scansToAverage: spectrumData.scansToAverage,
           );

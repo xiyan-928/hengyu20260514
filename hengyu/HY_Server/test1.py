@@ -1,9 +1,23 @@
 ﻿"""
 独立 HTTP 接收端：
 - 接收与监控接口 `data` 快照一致（get_snapshot 形状）的设备数据，并保留 device_id。
-  每条上送会追加写入 _uploaded_device_data/{安全设备ID}/{生产批次}.csv（无批次则为 _no_batch.csv）。
-- 接收来自主服务转换后的 .spc 文件，统一保存到 _upload_spc/{设备}/{批次}/{raw|dark|blank}/。
+  每条上送追加至 _upload_spc/{设备号_yyyy年MM月dd日_单号}/SENSOR.csv（与 raw/dark/blank 同级；不再单独使用 _uploaded_device_data，旧目录仅兼容读取）。
+- 接收来自主服务转换后的 .spc 文件，统一保存到 _upload_spc/{设备号_yyyy年MM月dd日_单号}/{raw|dark|blank}/。
+  （兼容旧版目录 _upload_spc/{设备}/{单号}/...，启动时仍会索引。）
 - 接收来自客户端上报的暗光谱与参比光谱（blank_before / blank_after）.spc 文件。
+
+生产切换与单号缓存（避免继续写入上一生产的目录）：
+- 归档目录为 ``{设备}_{yyyy年MM月dd日}_{单号}``；**单号**来自 POST /upload 补齐后的 ``generation_batch``，
+  以及 SPC 上传表单 ``batch``（缺省时读该设备工艺缓存）。
+- **推荐**：新生产**第一条**上送即带**新** ``generation_batch``，缓存更新后数据自动进入新单号目录。
+- **本锅结束、新单号未到**：发一条 **显式**含 ``"generation_batch": ""`` 或 ``null`` 的 /upload，服务端会
+  **清除**缓存中的单号，后续写入 ``…__no_batch``；新单号到达后再上送，并可触发无单号目录**重命名**。
+- **边缘端「自动控制停止」**：HY_Online 可在监视寄存器 **1→0** 或 **自动控制 enabled 关闭** 时调用
+  ``POST /device/{device_id}/production-end``，与上述空 ``generation_batch`` 上送等效，并**同时清除**
+  该设备的 ``/order_number`` 下发映射，便于前端与边缘恢复为「未获取」。
+- **目录末段单号**：已知单号则目录名为 ``…_{单号}``；未知则为 ``…__no_batch``（或带递增序号的 ``…__no_batch_{0001}``，存在
+  ``_process_aux.json`` 的 ``no_batch_seq`` 中；每次 **本锅结束**或显式清空 ``generation_batch`` 后递增，避免同日下一锅仍写入上一锅无单号目录）。
+- **同日且单号字符串与上一锅完全相同**仍要并列多目录：请在业务上区分单号（如 PO123-2），当前命名不含独立「锅次」段。
 
 在 HY_Server 目录下执行: python test1.py
 """
@@ -23,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 import uvicorn
 
 # ---- 日志配置：同时输出到终端和按日期滚动的日志文件 ----
@@ -81,13 +96,21 @@ SPC_STORE_DIR.mkdir(parents=True, exist_ok=True)
 BLANK_SPC_STORE_DIR = SPC_STORE_DIR
 UPDATE_STORE_DIR = Path(__file__).resolve().parent / "_updates"
 UPDATE_STORE_DIR.mkdir(parents=True, exist_ok=True)
-# 传感器上送：按设备、生产批次各占一个 .jsonl（每行一条 JSON）
-DEVICE_SENSOR_DIR = Path(__file__).resolve().parent / "_uploaded_device_data"
-DEVICE_SENSOR_DIR.mkdir(parents=True, exist_ok=True)
+# 传感器 CSV 与光谱共用 _upload_spc/{设备_yyyy年MM月dd日_单号}/；历史数据可读 _uploaded_device_data（不再自动创建）。
+LEGACY_SENSOR_DATA_DIR = Path(__file__).resolve().parent / "_uploaded_device_data"
+# 归档目录根部单一传感器文件（与 raw/dark/blank 子目录并列）
+_SENSOR_ARCHIVE_CSV = "SENSOR.csv"
 _DEVICE_FILE_LOCK = threading.Lock()
+_ARCHIVE_RENAME_LOCK = threading.Lock()
 _INVALID_BATCH_FILENAME_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 
-# 工艺/批次参数：客户端只在首次上送时携带，服务端按 device_id 缓存，
+# 单号下发：服务端按 device_id 维护当前生效单号，客户端通过 GET 拉取。
+# 数据落盘到 _order_numbers.json，重启后保留；空字符串/None 视为清除。
+_ORDER_NUMBER_FILE = Path(__file__).resolve().parent / "_order_numbers.json"
+_order_numbers: Dict[str, str] = {}
+_order_numbers_lock = threading.Lock()
+
+# 工艺/单号参数：客户端只在首次上送时携带，服务端按 device_id 缓存，
 # 后续每条 /upload 写盘前自动用缓存补齐缺失字段。
 _PROCESS_PARAM_KEYS: Tuple[str, ...] = (
     "generation_batch",
@@ -102,9 +125,12 @@ _PROCESS_PARAM_KEYS: Tuple[str, ...] = (
 )
 _process_cache: Dict[str, Dict[str, Any]] = {}
 _process_cache_lock = threading.Lock()
+# 持久化：无单号目录槽 + 一锅结束后抑制从 SENSOR CSV 回放 generation_batch（避免重启后旧单号又回到缓存、同日 __no_batch 目录复用）
+_PROCESS_AUX_FILE = Path(__file__).resolve().parent / "_process_aux.json"
+_process_aux_lock = threading.Lock()
 
 # CSV 文件结构：
-#   第 1 行 — 本批次的工艺参数，每个单元格形如 "key=value"
+#   第 1 行 — 本单号的工艺参数，每个单元格形如 "key=value"
 #   第 2 行 — 传感器表头（_SENSOR_CSV_FIELDS）
 #   第 3 行起 — 传感器数据
 _SENSOR_CSV_FIELDS: Tuple[str, ...] = (
@@ -137,6 +163,314 @@ _PROCESS_FLOAT_FIELDS = {
 
 _ALLOWED_BLANK_TYPES = {"blank_before", "blank_after"}
 _ALLOWED_SPC_KINDS = {"raw", "dark", "blank"}
+
+# 新版归档目录名中的日期段：中文「yyyy年MM月dd日」；兼容历史 ``_YYYYMMDD_`` 纯数字目录
+_SPC_ARCHIVE_DATE_RE = re.compile(
+    r"_((?:\d{4}年\d{2}月\d{2}日|\d{8}))_"
+)
+
+
+def _spc_date_segment_cn(when: datetime) -> str:
+    """用于目录名、文件名中的日期段：yyyy年MM月dd日（固定两位月日）。"""
+    return f"{when.year}年{when.month:02d}月{when.day:02d}日"
+
+
+def _spc_upload_archive_folder_name(
+    safe_device_id: str, safe_batch: str, when: datetime
+) -> str:
+    """上传 SPC 归档目录名：设备号_yyyy年MM月dd日_单号。"""
+    return f"{safe_device_id}_{_spc_date_segment_cn(when)}_{safe_batch}"
+
+
+def _parse_spc_archive_folder_name(folder_name: str) -> Optional[Tuple[str, str]]:
+    """从归档目录名解析 (device_id, batch)；失败返回 None。"""
+    m = _SPC_ARCHIVE_DATE_RE.search(folder_name)
+    if not m:
+        return None
+    device_id = folder_name[: m.start()].strip("_") or ""
+    batch = folder_name[m.end() :].lstrip("_") or ""
+    if not device_id or not batch:
+        return None
+    return device_id, batch
+
+
+def _rewrite_stored_paths_after_archive_rename(
+    old_root: Path, new_root: Path, new_batch: str
+) -> None:
+    """SPC 内存索引中路径与 batch 随归档根目录重命名而更新。"""
+    try:
+        old_r = old_root.resolve()
+        new_r = new_root.resolve()
+    except OSError:
+        return
+    old_base = str(old_r)
+    old_prefix = old_base + os.sep
+
+    def touch(rec: dict) -> None:
+        p = rec.get("path")
+        if not isinstance(p, str):
+            return
+        try:
+            resolved = Path(p).resolve()
+        except (OSError, RuntimeError):
+            return
+        s = str(resolved)
+        if s == old_base or s.startswith(old_prefix):
+            rel = s[len(old_base) :].lstrip(r"\/")
+            rec["path"] = str(new_r / rel) if rel else str(new_r)
+            rec["batch"] = new_batch
+
+    for lst in spc_store.values():
+        for rec in lst:
+            touch(rec)
+    for lst in dark_spc_store.values():
+        for rec in lst:
+            touch(rec)
+    for bmap in blank_spc_store.values():
+        for lst in bmap.values():
+            for rec in lst:
+                touch(rec)
+
+
+def _try_rename_no_batch_archive_folder(safe_device_id: str, new_batch: str) -> None:
+    """无单号占位目录（``no_batch`` / ``no_batch_*`` 段）在首次收到真实单号时重命名为新末段。
+
+    多目录并存时：若存在当日 ``…__no_batch``（无后缀），仍优先该目录；否则选 **末段序号最小**
+    的占位目录（纯 ``no_batch`` 优先于 ``no_batch_0001``，再优于 ``0002``…）；序号相同再按 mtime。
+    """
+    if (
+        not new_batch
+        or new_batch == "_no_batch"
+        or str(new_batch).startswith("_no_batch_")
+    ):
+        return
+    prefix = f"{safe_device_id}_"
+    with _ARCHIVE_RENAME_LOCK:
+        if not SPC_STORE_DIR.is_dir():
+            return
+        candidates: List[Path] = []
+        for p in SPC_STORE_DIR.iterdir():
+            if not p.is_dir() or not p.name.startswith(prefix):
+                continue
+            parsed = _parse_spc_archive_folder_name(p.name)
+            if not parsed:
+                continue
+            dev, seg = parsed
+            if dev != safe_device_id:
+                continue
+            if not _folder_batch_segment_is_placeholder(seg):
+                continue
+            candidates.append(p)
+        if not candidates:
+            return
+        now = datetime.now()
+        preferred_plain = SPC_STORE_DIR / _spc_upload_archive_folder_name(
+            safe_device_id, "_no_batch", now
+        )
+        if preferred_plain.is_dir():
+            src = preferred_plain
+        else:
+            # 多锅无单号目录并存时优先末段序号更小的（如 0001 先于 0002），避免误迁最新一锅。
+            src = min(candidates, key=_no_batch_placeholder_pick_key)
+        m = _SPC_ARCHIVE_DATE_RE.search(src.name)
+        if not m:
+            return
+        head = src.name[: m.end()]
+        dest_name = head + new_batch
+        dest = SPC_STORE_DIR / dest_name
+        if dest.exists():
+            logger.warning(
+                "无单号目录未重命名：目标归档已存在 device=%s dest=%s",
+                safe_device_id,
+                dest_name,
+            )
+            return
+        try:
+            old_r = src.resolve()
+            src.rename(dest)
+            new_r = dest.resolve()
+            _rewrite_stored_paths_after_archive_rename(old_r, new_r, new_batch)
+            logger.info(
+                "无单号归档已重命名为新单号: %s -> %s",
+                src.name,
+                dest_name,
+            )
+        except OSError as e:
+            logger.warning("归档重命名失败 %s -> %s: %s", src, dest, e)
+
+
+def _try_rename_batch_archive_folder(
+    safe_device_id: str,
+    old_batch_key: str,
+    new_batch_key: str,
+    when: datetime,
+) -> None:
+    """同日、同设备下将归档根目录末段由 old_batch_key 改为 new_batch_key（如手动单号 → 服务器单号）。
+
+    ``_no_batch`` 占位目录仍由 ``_try_rename_no_batch_archive_folder`` 处理；此处跳过。"""
+    if not old_batch_key or not new_batch_key or old_batch_key == new_batch_key:
+        return
+    if old_batch_key == "_no_batch" or new_batch_key == "_no_batch":
+        return
+    if str(old_batch_key).startswith("_no_batch_") or str(new_batch_key).startswith(
+        "_no_batch_"
+    ):
+        return
+    with _ARCHIVE_RENAME_LOCK:
+        if not SPC_STORE_DIR.is_dir():
+            return
+        src = SPC_STORE_DIR / _spc_upload_archive_folder_name(
+            safe_device_id, old_batch_key, when
+        )
+        dest = SPC_STORE_DIR / _spc_upload_archive_folder_name(
+            safe_device_id, new_batch_key, when
+        )
+        if not src.is_dir():
+            return
+        if dest.exists():
+            logger.warning(
+                "单号目录迁移跳过：目标已存在 device=%s %s -> %s",
+                safe_device_id,
+                src.name,
+                dest.name,
+            )
+            return
+        try:
+            old_r = src.resolve()
+            src.rename(dest)
+            new_r = dest.resolve()
+            _rewrite_stored_paths_after_archive_rename(old_r, new_r, new_batch_key)
+            logger.info(
+                "归档目录已随单号更新重命名: %s -> %s",
+                old_r.name,
+                new_r.name,
+            )
+        except OSError as e:
+            logger.warning("归档目录迁移失败 %s -> %s: %s", src, dest, e)
+
+
+def _peek_cached_generation_batch_raw(device_id: str) -> Any:
+    """读取工艺缓存中的 generation_batch（上传处理前快照），缺失则返回 None。"""
+    did = str(device_id or "").strip()
+    if not did:
+        return None
+    safe = _safe_device_id(did)
+    with _process_cache_lock:
+        cached = _process_cache.get(did) or _process_cache.get(safe) or {}
+        if "generation_batch" not in cached:
+            return None
+        return cached.get("generation_batch")
+
+
+def _spc_top_dir_has_kind_children(path: Path) -> bool:
+    try:
+        for ch in path.iterdir():
+            if ch.is_dir() and ch.name in _ALLOWED_SPC_KINDS:
+                return True
+    except OSError:
+        return False
+    return False
+
+
+def _collect_sensor_csv_paths_for_device(safe_dev: str) -> List[Path]:
+    """旧版 _uploaded_device_data 与新版 _upload_spc 下归档目录中的 SENSOR.csv（及历史 {单号}.csv）。"""
+    paths: List[Path] = []
+    for root in (LEGACY_SENSOR_DATA_DIR, SPC_STORE_DIR):
+        if not root.is_dir():
+            continue
+        legacy = root / safe_dev
+        if legacy.is_dir():
+            paths.extend(sorted(legacy.glob("*.csv")))
+        for top in root.iterdir():
+            if not top.is_dir():
+                continue
+            parsed = _parse_spc_archive_folder_name(top.name)
+            if not parsed:
+                continue
+            if parsed[0] != safe_dev:
+                continue
+            preferred = top / _SENSOR_ARCHIVE_CSV
+            if preferred.is_file():
+                paths.append(preferred)
+                continue
+            paths.extend(sorted(top.glob("*.csv")))
+    return paths
+
+
+def _find_sensor_batch_csv_path(safe_dev: str, safe_batch: str) -> Optional[Path]:
+    """定位传感器 CSV：新版在 _upload_spc 归档目录；旧版可在 _uploaded_device_data。多日同单号取最新修改时间。"""
+    candidates: List[Path] = []
+    for root in (LEGACY_SENSOR_DATA_DIR, SPC_STORE_DIR):
+        if not root.is_dir():
+            continue
+        legacy_flat = root / safe_dev / f"{safe_batch}.csv"
+        if legacy_flat.is_file():
+            candidates.append(legacy_flat)
+        for top in root.iterdir():
+            if not top.is_dir():
+                continue
+            parsed = _parse_spc_archive_folder_name(top.name)
+            if not parsed or parsed[0] != safe_dev or parsed[1] != safe_batch:
+                continue
+            p_new = top / _SENSOR_ARCHIVE_CSV
+            p_old = top / f"{safe_batch}.csv"
+            if p_new.is_file():
+                candidates.append(p_new)
+            elif p_old.is_file():
+                candidates.append(p_old)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _add_sensor_csv_to_batch_map(batch_map: Dict[str, dict], csv_path: Path) -> None:
+    """将单个传感器 CSV 摘要合并进 batch_map（同单号多文件时合并条数与时间范围）。"""
+    try:
+        with open(csv_path, encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.reader(f))
+    except OSError as e:
+        logger.warning("读取单号文件失败 %s：%s", csv_path, e)
+        return
+    if len(rows) < 2:
+        return
+    process = _parse_process_line(rows[0])
+    sensor_rows = [r for r in rows[2:] if r and any(c.strip() for c in r)]
+    first_time = sensor_rows[0][0] if sensor_rows else None
+    last_time = sensor_rows[-1][0] if sensor_rows else None
+    mtime = csv_path.stat().st_mtime
+    parent_parsed = _parse_spc_archive_folder_name(csv_path.parent.name)
+    batch_key = parent_parsed[1] if parent_parsed else csv_path.stem
+    new_item = {
+        "batch": batch_key,
+        "filename": csv_path.name,
+        "count": len(sensor_rows),
+        "first_time": first_time,
+        "last_time": last_time,
+        "process": process,
+        "spectrum_file_count": 0,
+        "blank_spc_file_count": 0,
+        "_sort_ts": mtime,
+    }
+    prev = batch_map.get(batch_key)
+    if prev is None:
+        batch_map[batch_key] = new_item
+        return
+    prev_mtime = float(prev.get("_sort_ts", 0))
+    prev.setdefault("spectrum_file_count", 0)
+    prev.setdefault("blank_spc_file_count", 0)
+    prev["count"] = int(prev.get("count", 0)) + len(sensor_rows)
+    if first_time and (
+        not prev.get("first_time") or first_time < prev["first_time"]
+    ):
+        prev["first_time"] = first_time
+    if last_time and (not prev.get("last_time") or last_time > prev["last_time"]):
+        prev["last_time"] = last_time
+    if mtime >= prev_mtime:
+        prev["process"] = process
+        prev["filename"] = csv_path.name
+    prev["_sort_ts"] = max(prev_mtime, mtime)
+
+
 # 支持的软件包后缀
 _ALLOWED_UPDATE_SUFFIXES = {".zip", ".tar.gz", ".apk", ".exe", ".dmg", ".deb", ".rpm"}
 # 从文件名解析版本号：匹配 _vX.Y.Z 或 _vX.Y 格式
@@ -186,7 +520,7 @@ def _scan_update_packages() -> List[dict]:
 
 
 def _safe_generation_batch(generation_batch: Any) -> str:
-    """生产批次名用作文件名，去除 Windows / Unix 非法字符；空则写入 _no_batch.jsonl。"""
+    """单号用作文件名，去除 Windows / Unix 非法字符；空则写入 _no_batch.jsonl。"""
     if generation_batch is None:
         return "_no_batch"
     raw = str(generation_batch).strip()
@@ -198,24 +532,266 @@ def _safe_generation_batch(generation_batch: Any) -> str:
     return s if s else "_no_batch"
 
 
-def _apply_process_cache(payload: dict) -> dict:
-    """更新设备工艺缓存；若本次未携带则用缓存补齐。原地修改并返回 payload。"""
+def _effective_archive_batch_key(
+    device_id: str, safe_device_id: str, generation_batch: Any
+) -> str:
+    """落盘用归档末段：真实单号用清洗后值；无单号时使用 ``_no_batch`` 或 ``_no_batch_{0001}`` 递增槽。"""
+    base = _safe_generation_batch(generation_batch)
+    if base != "_no_batch":
+        return base
+    did = str(device_id or "").strip()
+    if not did:
+        return "_no_batch"
+    safe = safe_device_id or _safe_device_id(did)
+    with _process_cache_lock:
+        c = _process_cache.get(did) or _process_cache.get(safe) or {}
+        slot = c.get("no_batch_dir_slot")
+    if isinstance(slot, str) and slot.strip():
+        suf = _INVALID_BATCH_FILENAME_RE.sub("_", slot.strip()).strip(" .")[:32]
+        if suf:
+            return f"_no_batch_{suf}"
+    return "_no_batch"
+
+
+def _folder_batch_segment_is_placeholder(seg: str) -> bool:
+    """解析自归档文件夹名的 batch 段是否为无单号占位（含 ``no_batch`` / ``no_batch_slot``）。"""
+    s = (seg or "").strip()
+    if s == "no_batch":
+        return True
+    return s.startswith("no_batch_")
+
+
+def _no_batch_placeholder_pick_key(path: Path) -> Tuple[int, int, float, str]:
+    """多占位目录时排序键：`min` = 优先末段序号更小的，其次更早 mtime。
+
+    - 纯 ``no_batch`` 视为序号 -1，优先于 ``no_batch_0001`` 等。
+    - ``no_batch_0007`` 等为数字后缀按其整数值排序。
+    - 非数字后缀（历史 hex 等）排在数字槽之后，同类再按 mtime、目录名稳定排序。
+    """
+    parsed = _parse_spc_archive_folder_name(path.name)
+    if not parsed:
+        return (2, 0, 0.0, path.name)
+    _, seg = parsed
+    s = (seg or "").strip()
+    try:
+        mt = path.stat().st_mtime
+    except OSError:
+        mt = 0.0
+    name = path.name
+    if s == "no_batch":
+        return (0, -1, mt, name)
+    if s.startswith("no_batch_"):
+        suf = s[len("no_batch_") :]
+        if suf.isdigit():
+            return (0, int(suf), mt, name)
+        return (1, 0, mt, name)
+    return (2, 0, mt, name)
+
+
+def _load_process_aux_disk() -> Dict[str, Any]:
+    if not _PROCESS_AUX_FILE.exists():
+        return {}
+    try:
+        with open(_PROCESS_AUX_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("读取工艺辅助状态失败 %s: %s", _PROCESS_AUX_FILE, e)
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _save_process_aux_disk(root: Dict[str, Any]) -> None:
+    tmp = _PROCESS_AUX_FILE.with_suffix(".json.tmp")
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(root, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, _PROCESS_AUX_FILE)
+    except OSError as e:
+        logger.warning("写入工艺辅助状态失败 %s: %s", _PROCESS_AUX_FILE, e)
+
+
+def _alloc_no_batch_dir_slot(safe_id: str) -> str:
+    """为新的一锅无单号归档分配递增槽（0001、0002…），写入 ``_process_aux`` 并 ``batch_cleared=True``。"""
+    safe = str(safe_id or "").strip()
+    if not safe:
+        return "0001"
+    with _process_aux_lock:
+        root = _load_process_aux_disk()
+        cur = dict(root.get(safe) or {})
+        try:
+            n = int(cur.get("no_batch_seq", 0) or 0)
+        except (TypeError, ValueError):
+            n = 0
+        n += 1
+        slot = f"{n:04d}"
+        cur["no_batch_seq"] = n
+        cur["no_batch_dir_slot"] = slot
+        cur["batch_cleared"] = True
+        root[safe] = cur
+        _save_process_aux_disk(root)
+        return slot
+
+
+def _persist_process_aux_cleared(safe_id: str, slot: str) -> None:
+    """一锅结束或清空单号：记下新 slot，并标记须忽略 CSV 回放的 generation_batch。"""
+    suf = str(slot or "").strip()[:32]
+    if not suf:
+        return
+    with _process_aux_lock:
+        root = _load_process_aux_disk()
+        cur = dict(root.get(safe_id) or {})
+        cur["no_batch_dir_slot"] = suf
+        cur["batch_cleared"] = True
+        root[safe_id] = cur
+        _save_process_aux_disk(root)
+
+
+def _apply_process_cache(
+    payload: dict, *, generation_batch_was_provided: bool = False
+) -> dict:
+    """更新设备工艺缓存；若本次未携带则用缓存补齐。原地修改并返回 payload。
+
+    当请求体中**显式**带有 ``generation_batch`` 且值为空/null 时，会清除该设备缓存里的单号，
+    后续归档使用占位 ``_no_batch`` 目录，便于「一锅结束 → 清空单号 → 再下发新单号」开始新文件夹。"""
     device_id = payload.get("device_id")
     if not isinstance(device_id, str) or not device_id.strip():
         return payload
-    incoming = {
-        k: payload[k]
-        for k in _PROCESS_PARAM_KEYS
-        if payload.get(k) is not None
-    }
+    did = device_id.strip()
+    new_slot: Optional[str] = None
+    if generation_batch_was_provided:
+        gb = payload.get("generation_batch")
+        if gb is None or (isinstance(gb, str) and not str(gb).strip()):
+            try:
+                new_slot = _alloc_no_batch_dir_slot(_safe_device_id(did))
+            except HTTPException:
+                new_slot = None
     with _process_cache_lock:
-        cached = _process_cache.setdefault(device_id, {})
+        cached = _process_cache.setdefault(did, {})
+        if new_slot is not None:
+            cached.pop("generation_batch", None)
+            cached["no_batch_dir_slot"] = new_slot
+        incoming = {
+            k: payload[k]
+            for k in _PROCESS_PARAM_KEYS
+            if payload.get(k) is not None
+        }
         if incoming:
             cached.update(incoming)
-        for k, v in cached.items():
-            if payload.get(k) is None:
+        for k in _PROCESS_PARAM_KEYS:
+            v = cached.get(k)
+            if v is not None and payload.get(k) is None:
                 payload[k] = v
     return payload
+
+
+def _clear_generation_batch_cache(device_id: str) -> tuple[str, str, bool]:
+    """清除该设备工艺缓存中的 generation_batch，并刷新无单号归档槽（新的一锅使用新目录）。"""
+    raw = str(device_id or "").strip()
+    if not raw:
+        raise HTTPException(status_code=400, detail="缺少 device_id")
+    safe = _safe_device_id(raw)
+    slot = _alloc_no_batch_dir_slot(safe)
+    cleared = False
+    with _process_cache_lock:
+        for key in {raw, safe}:
+            c = _process_cache.setdefault(key, {})
+            c["no_batch_dir_slot"] = slot
+            if c.pop("generation_batch", None) is not None:
+                cleared = True
+    return raw, safe, cleared
+
+
+def _persist_process_aux_has_batch(safe_id: str) -> None:
+    """已有有效 generation_batch 写入缓存后，允许 CSV 回放中的单号参与合并。"""
+    with _process_aux_lock:
+        root = _load_process_aux_disk()
+        cur = dict(root.get(safe_id) or {})
+        cur["batch_cleared"] = False
+        root[safe_id] = cur
+        _save_process_aux_disk(root)
+
+
+def _apply_process_aux_after_rebuild() -> None:
+    """启动重建 device_store 工艺缓存后应用磁盘辅助状态（优先于 CSV 中的旧单号）。"""
+    root = _load_process_aux_disk()
+    if not root:
+        return
+
+    def _apply_aux_to_entry(did_key: str, aux: Dict[str, Any]) -> None:
+        c = _process_cache.setdefault(did_key, {})
+        slot = aux.get("no_batch_dir_slot")
+        if isinstance(slot, str) and slot.strip():
+            c["no_batch_dir_slot"] = str(slot).strip()[:32]
+        if aux.get("batch_cleared"):
+            c.pop("generation_batch", None)
+
+    with _process_cache_lock:
+        seen: set[str] = set()
+        for did in list(_process_cache.keys()):
+            try:
+                s = _safe_device_id(did)
+            except HTTPException:
+                continue
+            aux = root.get(s)
+            if not isinstance(aux, dict):
+                continue
+            _apply_aux_to_entry(did, aux)
+            seen.add(s)
+        for s, aux in root.items():
+            if not isinstance(s, str) or not isinstance(aux, dict):
+                continue
+            if s in seen:
+                continue
+            _apply_aux_to_entry(s, aux)
+    logger.info("已合并工艺辅助状态（一锅结束/slot）设备: %s", sorted(root.keys()))
+
+
+def _generation_batch_explicitly_in_request(data: DeviceData) -> bool:
+    """判断请求体是否显式携带 generation_batch（兼容 Pydantic v1 __fields_set__）。"""
+    fs = getattr(data, "model_fields_set", None)
+    if fs is not None and "generation_batch" in fs:
+        return True
+    fsv1 = getattr(data, "__fields_set__", None)
+    return bool(fsv1 and "generation_batch" in fsv1)
+
+
+def _sync_process_cache_from_dispatch_and_rename_archives(
+    path_device_id: str, new_order_text: Optional[str]
+) -> None:
+    """HTTP 下发/清除单号后同步 ``_process_cache.generation_batch`` 并重命名 ``_upload_spc`` 归档目录。
+
+    否则仅有 ``_order_numbers`` 更新时，工艺缓存与磁盘目录末段仍停留在旧单号。"""
+    raw_param = str(path_device_id or "").strip()
+    if not raw_param:
+        return
+    safe_dev = _safe_device_id(path_device_id)
+    peeked_gb = _peek_cached_generation_batch_raw(raw_param)
+    old_simple = _safe_generation_batch(peeked_gb)
+    norm = str(new_order_text).strip() if new_order_text else ""
+    new_slot: Optional[str] = None
+    if not norm:
+        new_slot = _alloc_no_batch_dir_slot(safe_dev)
+    now = datetime.now()
+    with _process_cache_lock:
+        for key in {raw_param, safe_dev}:
+            c = _process_cache.setdefault(key, {})
+            if norm:
+                c["generation_batch"] = norm
+            else:
+                c.pop("generation_batch", None)
+                if new_slot is not None:
+                    c["no_batch_dir_slot"] = new_slot
+    new_simple = _safe_generation_batch(norm if norm else None)
+    _try_rename_no_batch_archive_folder(safe_dev, new_simple)
+    _try_rename_batch_archive_folder(safe_dev, old_simple, new_simple, now)
+    logger.info(
+        "单号下发已同步工艺缓存并尝试归档重命名 device=%s old=%s new=%s",
+        safe_dev,
+        old_simple,
+        new_simple,
+    )
+    if norm:
+        _persist_process_aux_has_batch(safe_dev)
 
 
 def _device_record_sort_ts(rec: dict) -> float:
@@ -317,7 +893,9 @@ def _sensor_row_to_record(row: Dict[str, str]) -> Optional[dict]:
 
 
 def _append_device_payload_to_disk(payload: dict) -> None:
-    """将单条上送追加到 _uploaded_device_data/{safe_device}/{批次}.csv。
+    """将单条上送追加到 _upload_spc/{设备_yyyy年MM月dd日_单号}/SENSOR.csv（与光谱同目录）。
+
+    兼容读取旧版 _uploaded_device_data/… 下的 CSV。
 
     文件结构：
       行 1 — 工艺参数（key=value，每字段一格）
@@ -327,11 +905,14 @@ def _append_device_payload_to_disk(payload: dict) -> None:
     device_id = payload.get("device_id")
     if not isinstance(device_id, str) or not device_id.strip():
         raise ValueError("payload 缺少 device_id")
-    batch_key = _safe_generation_batch(payload.get("generation_batch"))
+    did = device_id.strip()
     safe_dev = _safe_device_id(device_id)
-    batch_dir = DEVICE_SENSOR_DIR / safe_dev
+    batch_key = _effective_archive_batch_key(did, safe_dev, payload.get("generation_batch"))
+    now = datetime.now()
+    archive_name = _spc_upload_archive_folder_name(safe_dev, batch_key, now)
+    batch_dir = SPC_STORE_DIR / archive_name
     batch_dir.mkdir(parents=True, exist_ok=True)
-    path = batch_dir / f"{batch_key}.csv"
+    path = batch_dir / _SENSOR_ARCHIVE_CSV
     sensor_row = _sensor_row_values(payload)
     with _DEVICE_FILE_LOCK:
         new_file = not path.exists() or path.stat().st_size == 0
@@ -346,55 +927,66 @@ def _append_device_payload_to_disk(payload: dict) -> None:
 
 
 def _rebuild_device_store_from_disk() -> None:
-    """启动时从 DEVICE_SENSOR_DIR 恢复 device_store（与内存列表一致，按时间排序），
-    并按设备恢复工艺参数缓存（使用每设备最新的非空字段值）。
-    兼容历史 .jsonl 与当前 .csv 两种格式。"""
-    if not DEVICE_SENSOR_DIR.exists():
-        return
+    """启动时恢复 sensor 历史：先扫旧目录 _uploaded_device_data，再扫 _upload_spc 下各归档目录的 SENSOR.csv。
+
+    兼容历史 .jsonl 与 .csv；jsonl 仅在旧目录中查找。
+    """
     total_lines = 0
-    for device_dir in sorted(DEVICE_SENSOR_DIR.iterdir()):
-        if not device_dir.is_dir():
-            continue
-        # 先读旧 JSONL（兼容历史数据），再读新 CSV
-        for jsonl_path in sorted(device_dir.glob("*.jsonl")):
-            try:
-                with open(jsonl_path, encoding="utf-8") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        rec = json.loads(line)
-                        did = rec.get("device_id")
-                        if not isinstance(did, str) or not did:
-                            continue
-                        device_store.setdefault(did, []).append(rec)
-                        total_lines += 1
-            except (OSError, json.JSONDecodeError) as e:
-                logger.warning("读取传感器 jsonl 文件失败，已跳过 %s：%s", jsonl_path, e)
-        for csv_path in sorted(device_dir.glob("*.csv")):
-            try:
-                with open(csv_path, encoding="utf-8-sig", newline="") as f:
-                    rows = list(csv.reader(f))
-            except OSError as e:
-                logger.warning("读取传感器 csv 文件失败，已跳过 %s：%s", csv_path, e)
+
+    def _ingest_sensor_csv_file(csv_path: Path) -> None:
+        nonlocal total_lines
+        try:
+            with open(csv_path, encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.reader(f))
+        except OSError as e:
+            logger.warning("读取传感器 csv 文件失败，已跳过 %s：%s", csv_path, e)
+            return
+        if len(rows) < 2:
+            return
+        process = _parse_process_line(rows[0])
+        sensor_header = rows[1]
+        for raw in rows[2:]:
+            if not raw:
                 continue
-            if len(rows) < 2:
+            row_dict = dict(zip(sensor_header, raw))
+            rec = _sensor_row_to_record(row_dict)
+            if rec is None:
                 continue
-            process = _parse_process_line(rows[0])
-            sensor_header = rows[1]
-            for raw in rows[2:]:
-                if not raw:
-                    continue
-                row_dict = dict(zip(sensor_header, raw))
-                rec = _sensor_row_to_record(row_dict)
-                if rec is None:
-                    continue
-                # 用文件首行的工艺参数补齐传感器记录中缺失的字段
-                for k, v in process.items():
-                    if rec.get(k) is None:
-                        rec[k] = v
-                device_store.setdefault(rec["device_id"], []).append(rec)
-                total_lines += 1
+            for k, v in process.items():
+                if rec.get(k) is None:
+                    rec[k] = v
+            device_store.setdefault(rec["device_id"], []).append(rec)
+            total_lines += 1
+
+    if LEGACY_SENSOR_DATA_DIR.exists():
+        for device_dir in sorted(LEGACY_SENSOR_DATA_DIR.iterdir()):
+            if not device_dir.is_dir():
+                continue
+            for jsonl_path in sorted(device_dir.glob("*.jsonl")):
+                try:
+                    with open(jsonl_path, encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            rec = json.loads(line)
+                            did = rec.get("device_id")
+                            if not isinstance(did, str) or not did:
+                                continue
+                            device_store.setdefault(did, []).append(rec)
+                            total_lines += 1
+                except (OSError, json.JSONDecodeError) as e:
+                    logger.warning("读取传感器 jsonl 文件失败，已跳过 %s：%s", jsonl_path, e)
+            for csv_path in sorted(device_dir.glob("*.csv")):
+                _ingest_sensor_csv_file(csv_path)
+
+    if SPC_STORE_DIR.exists():
+        for top in sorted(SPC_STORE_DIR.iterdir()):
+            if not top.is_dir():
+                continue
+            sp = top / _SENSOR_ARCHIVE_CSV
+            if sp.is_file():
+                _ingest_sensor_csv_file(sp)
     for rows in device_store.values():
         rows.sort(key=_device_record_sort_ts)
     # 用每设备最新的非空字段重建工艺缓存（按时间正序遍历，后者覆盖前者）
@@ -419,50 +1011,69 @@ def _rebuild_device_store_from_disk() -> None:
 def _rebuild_stores_from_disk() -> None:
     """服务器启动时扫描磁盘，重建 spc_store 和 blank_spc_store 索引。
 
-    光谱目录结构：_upload_spc/{device_id}/{batch}/{raw|dark|blank}/*.spc
+    新版：_upload_spc/{设备号_yyyy年MM月dd日_单号}/{raw|dark|blank}/*.spc
+    旧版：_upload_spc/{device_id}/{batch}/{raw|dark|blank}/*.spc
     文件按修改时间升序排列，与上传顺序保持一致。
     """
     spc_count = 0
     dark_count = 0
     blank_count = 0
-    if SPC_STORE_DIR.exists():
-        for device_dir in sorted(SPC_STORE_DIR.iterdir()):
-            if not device_dir.is_dir():
+
+    def _ingest(device_id: str, batch: str, kind_root: Path) -> None:
+        nonlocal spc_count, dark_count, blank_count
+        for kind_dir in sorted(kind_root.iterdir()):
+            if not kind_dir.is_dir():
                 continue
-            device_id = device_dir.name
-            for batch_dir in sorted(device_dir.iterdir()):
-                if not batch_dir.is_dir():
+            kind = kind_dir.name
+            if kind not in _ALLOWED_SPC_KINDS:
+                continue
+            files = sorted(
+                kind_dir.glob("*.spc"), key=lambda f: f.stat().st_mtime
+            )
+            for spc_file in files:
+                rec = _spc_record_from_file(
+                    device_id=device_id,
+                    batch=batch,
+                    kind=kind,
+                    spc_file=spc_file,
+                    blank_type=_blank_type_from_filename(spc_file.name)
+                    if kind == "blank"
+                    else None,
+                )
+                if kind == "raw":
+                    spc_store.setdefault(device_id, []).append(rec)
+                    spc_count += 1
+                elif kind == "dark":
+                    dark_spc_store.setdefault(device_id, []).append(rec)
+                    dark_count += 1
+                elif kind == "blank":
+                    blank_type = rec.get("blank_type") or "blank"
+                    blank_spc_store.setdefault(device_id, {}).setdefault(
+                        blank_type, []
+                    ).append(rec)
+                    blank_count += 1
+
+    if SPC_STORE_DIR.exists():
+        for top_dir in sorted(SPC_STORE_DIR.iterdir()):
+            if not top_dir.is_dir():
+                continue
+
+            if _spc_top_dir_has_kind_children(top_dir):
+                parsed = _parse_spc_archive_folder_name(top_dir.name)
+                if not parsed:
+                    logger.warning(
+                        "无法解析 SPC 归档目录名（跳过索引）: %s", top_dir.name
+                    )
                     continue
-                batch = batch_dir.name
-                for kind_dir in sorted(batch_dir.iterdir()):
-                    if not kind_dir.is_dir():
+                dev, bat = parsed
+                _ingest(dev, bat, top_dir)
+            else:
+                device_id = top_dir.name
+                for batch_dir in sorted(top_dir.iterdir()):
+                    if not batch_dir.is_dir():
                         continue
-                    kind = kind_dir.name
-                    if kind not in _ALLOWED_SPC_KINDS:
-                        continue
-                    files = sorted(kind_dir.glob("*.spc"), key=lambda f: f.stat().st_mtime)
-                    for spc_file in files:
-                        rec = _spc_record_from_file(
-                            device_id=device_id,
-                            batch=batch,
-                            kind=kind,
-                            spc_file=spc_file,
-                            blank_type=_blank_type_from_filename(spc_file.name)
-                            if kind == "blank"
-                            else None,
-                        )
-                        if kind == "raw":
-                            spc_store.setdefault(device_id, []).append(rec)
-                            spc_count += 1
-                        elif kind == "dark":
-                            dark_spc_store.setdefault(device_id, []).append(rec)
-                            dark_count += 1
-                        elif kind == "blank":
-                            blank_type = rec.get("blank_type") or "blank"
-                            blank_spc_store.setdefault(device_id, {}).setdefault(
-                                blank_type, []
-                            ).append(rec)
-                            blank_count += 1
+                    batch = batch_dir.name
+                    _ingest(device_id, batch, batch_dir)
 
     logger.info(
         "磁盘索引重建完成：采样光谱 %d 条，暗光谱 %d 条，参比光谱 %d 条，涉及设备 %s",
@@ -485,7 +1096,9 @@ app = FastAPI(
 @app.on_event("startup")
 async def startup_event() -> None:
     _rebuild_device_store_from_disk()
+    _apply_process_aux_after_rebuild()
     _rebuild_stores_from_disk()
+    _load_order_numbers_from_disk()
 
 
 def _safe_spc_filename(filename: str) -> str:
@@ -506,14 +1119,61 @@ def _safe_device_id(device_id: str) -> str:
     return "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in safe)
 
 
+def _load_order_numbers_from_disk() -> None:
+    """启动时从 _ORDER_NUMBER_FILE 恢复 device_id -> order_number 映射。"""
+    if not _ORDER_NUMBER_FILE.exists():
+        return
+    try:
+        with open(_ORDER_NUMBER_FILE, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("读取单号映射文件失败 %s: %s", _ORDER_NUMBER_FILE, e)
+        return
+    if not isinstance(data, dict):
+        return
+    with _order_numbers_lock:
+        _order_numbers.clear()
+        for k, v in data.items():
+            if not isinstance(k, str):
+                continue
+            if v is None:
+                continue
+            text = str(v).strip()
+            if not text:
+                continue
+            _order_numbers[k] = text
+    logger.info("已加载 %d 个设备的单号映射", len(_order_numbers))
+
+
+def _save_order_numbers_to_disk_locked() -> None:
+    """假定调用方已持 _order_numbers_lock，将当前映射原子写入磁盘。"""
+    tmp_path = _ORDER_NUMBER_FILE.with_suffix(".json.tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(_order_numbers, f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, _ORDER_NUMBER_FILE)
+    except OSError as e:
+        logger.warning("写入单号映射文件失败 %s: %s", _ORDER_NUMBER_FILE, e)
+
+
+class OrderNumberRequest(BaseModel):
+    """设置/清除单号请求体。order_number 为 null 或空字符串视为清除。"""
+
+    order_number: Optional[str] = Field(
+        default=None,
+        description="要下发给该设备的单号；传 null 或空字符串等价于清除",
+    )
+
+
 def _resolve_spc_batch(device_id: str, safe_device_id: str, batch: Optional[str]) -> str:
-    """SPC 批次优先使用上传字段；缺失时使用该设备缓存的 generation_batch。"""
+    """SPC 单号优先使用上传字段；缺失时使用该设备缓存的 generation_batch（含无单号 slot）。"""
     if batch is not None and str(batch).strip():
         return _safe_generation_batch(batch)
+    did = str(device_id or "").strip()
     with _process_cache_lock:
-        cached = _process_cache.get(device_id) or _process_cache.get(safe_device_id) or {}
+        cached = _process_cache.get(did) or _process_cache.get(safe_device_id) or {}
         cached_batch = cached.get("generation_batch")
-    return _safe_generation_batch(cached_batch)
+    return _effective_archive_batch_key(did, safe_device_id, cached_batch)
 
 
 def _blank_type_from_filename(filename: str) -> Optional[str]:
@@ -638,12 +1298,16 @@ def _device_has_spc_batch(safe_device_id: str, safe_batch: str) -> bool:
 
 
 def _merge_spc_batches(batch_map: Dict[str, dict], safe_device_id: str) -> None:
-    """让仅上传光谱、未上传传感器的批次也出现在批次列表中。"""
-    for rec in _iter_spc_records_for_device(safe_device_id):
-        batch = str(rec.get("batch") or "").strip()
+    """让仅上传光谱、未上传传感器的单号也出现在单号列表中；并分别累计采样光谱条数与参比条数。"""
+    def upsert(
+        batch: str,
+        server_time: str,
+        *,
+        spectrum_delta: int = 0,
+        blank_delta: int = 0,
+    ) -> None:
         if not batch:
-            continue
-        server_time = str(rec.get("server_time") or "")
+            return
         ts = _parse_server_time(server_time)
         sort_ts = ts.timestamp() if ts else 0.0
         item = batch_map.get(batch)
@@ -655,17 +1319,42 @@ def _merge_spc_batches(batch_map: Dict[str, dict], safe_device_id: str) -> None:
                 "first_time": server_time or None,
                 "last_time": server_time or None,
                 "process": {},
-                "spc_count": 0,
+                "spectrum_file_count": 0,
+                "blank_spc_file_count": 0,
                 "_sort_ts": sort_ts,
             }
             batch_map[batch] = item
-        item["spc_count"] = int(item.get("spc_count") or 0) + 1
+        else:
+            item.setdefault("spectrum_file_count", 0)
+            item.setdefault("blank_spc_file_count", 0)
+        item["spectrum_file_count"] = int(item.get("spectrum_file_count") or 0) + spectrum_delta
+        item["blank_spc_file_count"] = int(item.get("blank_spc_file_count") or 0) + blank_delta
         if sort_ts and sort_ts > float(item.get("_sort_ts") or 0.0):
             item["_sort_ts"] = sort_ts
         if server_time and (not item.get("first_time") or server_time < item["first_time"]):
             item["first_time"] = server_time
         if server_time and (not item.get("last_time") or server_time > item["last_time"]):
             item["last_time"] = server_time
+
+    for rec in spc_store.get(safe_device_id) or []:
+        upsert(
+            str(rec.get("batch") or "").strip(),
+            str(rec.get("server_time") or ""),
+            spectrum_delta=1,
+        )
+    for rec in dark_spc_store.get(safe_device_id) or []:
+        # 暗光谱参与单号归档与时间排序，不计入「采样光谱」条数（与 /spc/device 列表一致）。
+        upsert(
+            str(rec.get("batch") or "").strip(),
+            str(rec.get("server_time") or ""),
+        )
+    for type_records in (blank_spc_store.get(safe_device_id) or {}).values():
+        for rec in type_records:
+            upsert(
+                str(rec.get("batch") or "").strip(),
+                str(rec.get("server_time") or ""),
+                blank_delta=1,
+            )
 
 
 def _read_spc_spectrum_data(path: str, title: str) -> dict[str, Any]:
@@ -715,7 +1404,22 @@ async def _save_uploaded_spc(
             detail=f"无效的 blank_type '{blank_type}'，允许值: {sorted(_ALLOWED_BLANK_TYPES)}",
         )
     safe_device_id = _safe_device_id(device_id)
+    peeked_gb = _peek_cached_generation_batch_raw(device_id)
+    did = device_id.strip()
+    with _process_cache_lock:
+        c = _process_cache.get(did) or _process_cache.get(safe_device_id) or {}
+        cached_gb = c.get("generation_batch")
+    new_simple = (
+        _safe_generation_batch(batch)
+        if batch is not None and str(batch).strip()
+        else _safe_generation_batch(cached_gb)
+    )
     safe_batch = _resolve_spc_batch(device_id, safe_device_id, batch)
+    now = datetime.now()
+    _try_rename_no_batch_archive_folder(safe_device_id, new_simple)
+    _try_rename_batch_archive_folder(
+        safe_device_id, _safe_generation_batch(peeked_gb), new_simple, now
+    )
     original_name = _safe_spc_filename(
         spc_file.filename or f"{kind if kind != 'blank' else blank_type or 'blank'}.spc"
     )
@@ -723,14 +1427,23 @@ async def _save_uploaded_spc(
     if not data:
         raise HTTPException(status_code=400, detail="上传的 SPC 文件为空")
 
-    now = datetime.now()
     server_time = now.strftime("%Y-%m-%d %H:%M:%S")
-    device_dir = SPC_STORE_DIR / safe_device_id / safe_batch / kind
+    archive_name = _spc_upload_archive_folder_name(safe_device_id, safe_batch, now)
+    device_dir = SPC_STORE_DIR / archive_name / kind
     device_dir.mkdir(parents=True, exist_ok=True)
 
-    stem = Path(original_name).stem
-    saved_name = f"{stem}_{now.strftime('%Y%m%d_%H%M%S')}.spc"
+    # 文件名：类型前缀 + YYYYMMDD + HHMMSS
+    if kind == "blank" and blank_type:
+        label = str(blank_type)
+    else:
+        label = kind
+    date_seg = now.strftime("%Y%m%d")
+    base_t = now.strftime("%H%M%S")
+    saved_name = f"{label}_{date_seg}_{base_t}.spc"
     saved_path = device_dir / saved_name
+    if saved_path.exists():
+        saved_name = f"{label}_{date_seg}_{base_t}_{now.microsecond // 1000:03d}.spc"
+        saved_path = device_dir / saved_name
     with open(saved_path, "wb") as f:
         f.write(data)
 
@@ -795,6 +1508,12 @@ def home():
             "GET /spc/blank/device/{device_id}/{blank_type}/files/{filename}/data",
             "GET /spc/search",
             "GET /spc/search?date_from=YYYY-MM-DD&date_to=YYYY-MM-DD&device_id=xxx&spc_type=sample|blank_before|blank_after",
+            "--- 单号下发 ---",
+            "GET /order_numbers",
+            "GET /device/{device_id}/order_number",
+            "POST /device/{device_id}/order_number  body: {\"order_number\": \"XYZ\"}",
+            "DELETE /device/{device_id}/order_number",
+            "POST /device/{device_id}/production-end  （清除工艺缓存单号，等同显式空 generation_batch）",
             "--- 软件更新 ---",
             "POST /update/upload",
             "GET /update/list",
@@ -808,19 +1527,32 @@ def home():
 
 @app.post("/upload")
 def upload_device_data(data: DeviceData) -> dict[str, Any]:
+    peeked_gb = _peek_cached_generation_batch_raw(data.device_id)
     payload = data.model_dump()
     payload["server_time"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    # 客户端只在首次成功时携带工艺/批次参数，后续靠服务端缓存补齐
-    _apply_process_cache(payload)
+    # 客户端只在首次成功时携带工艺/单号参数，后续靠服务端缓存补齐
+    _apply_process_cache(
+        payload,
+        generation_batch_was_provided=_generation_batch_explicitly_in_request(data),
+    )
+    safe_dev = _safe_device_id(data.device_id)
+    gb_live = payload.get("generation_batch")
+    if gb_live is not None and str(gb_live).strip():
+        _persist_process_aux_has_batch(safe_dev)
+    now = datetime.now()
+    old_simple = _safe_generation_batch(peeked_gb)
+    new_simple = _safe_generation_batch(payload.get("generation_batch"))
+    _try_rename_no_batch_archive_folder(safe_dev, new_simple)
+    _try_rename_batch_archive_folder(safe_dev, old_simple, new_simple, now)
 
     try:
         _append_device_payload_to_disk(payload)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     except OSError as e:
-        logger.exception("写入传感器批次文件失败 device_id=%s", data.device_id)
+        logger.exception("写入传感器单号文件失败 device_id=%s", data.device_id)
         raise HTTPException(
-            status_code=500, detail=f"无法写入本地传感器批次文件: {e}"
+            status_code=500, detail=f"无法写入本地传感器单号文件: {e}"
         ) from e
 
     if data.device_id not in device_store:
@@ -877,6 +1609,106 @@ def get_all_devices():
     }
 
 
+@app.get("/order_numbers")
+def list_order_numbers() -> dict[str, Any]:
+    """列出当前所有设备的单号映射；客户端无需鉴权即可查阅，便于运维核对。"""
+    with _order_numbers_lock:
+        snapshot = dict(_order_numbers)
+    return {
+        "count": len(snapshot),
+        "order_numbers": snapshot,
+    }
+
+
+@app.get("/device/{device_id}/order_number")
+def get_device_order_number(device_id: str) -> dict[str, Any]:
+    """读取该设备当前的单号；客户端按固定间隔轮询此接口拉取最新单号。"""
+    safe_dev = _safe_device_id(device_id)
+    with _order_numbers_lock:
+        current = _order_numbers.get(safe_dev)
+    return {
+        "device_id": safe_dev,
+        "order_number": current,
+    }
+
+
+@app.post("/device/{device_id}/order_number")
+def set_device_order_number(device_id: str, body: OrderNumberRequest) -> dict[str, Any]:
+    """设置/清除该设备的单号；传 null 或空字符串等价于 DELETE，立即落盘以便重启后保留。"""
+    safe_dev = _safe_device_id(device_id)
+    raw_param = str(device_id or "").strip()
+    raw = (body.order_number or "").strip()
+    with _order_numbers_lock:
+        if raw:
+            _order_numbers[safe_dev] = raw
+            if raw_param != safe_dev:
+                _order_numbers[raw_param] = raw
+            action = "set"
+        else:
+            _order_numbers.pop(safe_dev, None)
+            if raw_param != safe_dev:
+                _order_numbers.pop(raw_param, None)
+            action = "cleared"
+        _save_order_numbers_to_disk_locked()
+        current = _order_numbers.get(safe_dev)
+    logger.info("单号已 %s device=%s order_number=%s", action, safe_dev, current)
+    _sync_process_cache_from_dispatch_and_rename_archives(device_id, raw if raw else None)
+    return {
+        "status": "ok",
+        "action": action,
+        "device_id": safe_dev,
+        "order_number": current,
+    }
+
+
+@app.post("/device/{device_id}/production-end")
+def production_end(device_id: str) -> dict[str, Any]:
+    """本锅结束：清除工艺缓存中的 generation_batch，并清除该设备的 /order_number 下发映射（与 DELETE 一致）。"""
+    raw, safe, cleared = _clear_generation_batch_cache(device_id)
+    removed_order = False
+    with _order_numbers_lock:
+        if _order_numbers.pop(safe, None) is not None:
+            removed_order = True
+        if raw != safe and _order_numbers.pop(raw, None) is not None:
+            removed_order = True
+        if removed_order:
+            _save_order_numbers_to_disk_locked()
+    logger.info(
+        "production-end: device_id=%s (safe=%s) cleared_generation_batch=%s removed_order_number=%s",
+        raw,
+        safe,
+        cleared,
+        removed_order,
+    )
+    return {
+        "status": "ok",
+        "device_id": raw,
+        "cleared_generation_batch": cleared,
+        "removed_order_number": removed_order,
+    }
+
+
+@app.delete("/device/{device_id}/order_number")
+def delete_device_order_number(device_id: str) -> dict[str, Any]:
+    """显式清除该设备的单号映射，客户端轮询将拿到 order_number=null。"""
+    raw_param = str(device_id or "").strip()
+    safe_dev = _safe_device_id(device_id)
+    with _order_numbers_lock:
+        existed = _order_numbers.pop(safe_dev, None) is not None
+        if raw_param != safe_dev:
+            existed = _order_numbers.pop(raw_param, None) is not None or existed
+        if existed:
+            _save_order_numbers_to_disk_locked()
+    if existed:
+        logger.info("单号已 removed device=%s", safe_dev)
+    _sync_process_cache_from_dispatch_and_rename_archives(raw_param, None)
+    return {
+        "status": "ok",
+        "device_id": safe_dev,
+        "removed": existed,
+    }
+
+
 @app.get("/device/{device_id}")
 def get_device_data(device_id: str):
     known = (
@@ -916,39 +1748,19 @@ def get_latest_device_data(device_id: str):
 
 @app.get("/device/{device_id}/batches")
 def list_device_batches(device_id: str):
-    """列出该设备已落盘的所有生产批次。
+    """列出该设备已落盘的所有生产单号。
 
-    扫描 _uploaded_device_data/{safe_device}/*.csv，逐文件解析首行工艺参数与
-    传感器记录条数；同时合并仅上传了 SPC、尚无传感器 CSV 的批次。
-    结果按最新传感器/SPC 写入时间倒序排列（最近的批次在前）。
+    扫描 _uploaded_device_data（旧）与 _upload_spc 归档目录中的 SENSOR.csv，
+    逐文件解析首行工艺参数与传感器记录条数（字段 ``count``）；同时合并仅上传了光谱、尚无传感器 CSV 的单号。
+    对每个单号另行统计：``spectrum_file_count``（采样光谱 raw，与 ``GET /spc/device`` 一致）、
+    ``blank_spc_file_count``（全部参比类型合计）。
+    暗光谱仅参与时间排序与单号出现，不计入 ``spectrum_file_count``。
+    结果按最新传感器/光谱写入时间倒序排列（最近的单号在前）。
     """
     safe_dev = _safe_device_id(device_id)
-    device_dir = DEVICE_SENSOR_DIR / safe_dev
     batch_map: Dict[str, dict] = {}
-    if device_dir.exists():
-        for csv_path in device_dir.glob("*.csv"):
-            try:
-                with open(csv_path, encoding="utf-8-sig", newline="") as f:
-                    rows = list(csv.reader(f))
-            except OSError as e:
-                logger.warning("读取批次文件失败 %s：%s", csv_path, e)
-                continue
-            if len(rows) < 2:
-                continue
-            process = _parse_process_line(rows[0])
-            sensor_rows = [r for r in rows[2:] if r and any(c.strip() for c in r)]
-            first_time = sensor_rows[0][0] if sensor_rows else None
-            last_time = sensor_rows[-1][0] if sensor_rows else None
-            batch_map[csv_path.stem] = {
-                "batch": csv_path.stem,
-                "filename": csv_path.name,
-                "count": len(sensor_rows),
-                "first_time": first_time,
-                "last_time": last_time,
-                "process": process,
-                "spc_count": 0,
-                "_sort_ts": csv_path.stat().st_mtime,
-            }
+    for csv_path in _collect_sensor_csv_paths_for_device(safe_dev):
+        _add_sensor_csv_to_batch_map(batch_map, csv_path)
     _merge_spc_batches(batch_map, safe_dev)
     batches = sorted(
         batch_map.values(),
@@ -966,14 +1778,14 @@ def list_device_batches(device_id: str):
 
 @app.get("/device/{device_id}/batch/{batch}")
 def get_device_batch(device_id: str, batch: str):
-    """读取指定批次 CSV，返回该批次的工艺参数与所有传感器记录。
+    """读取指定单号 CSV，返回该单号的工艺参数与所有传感器记录。
 
     传感器记录会自动用文件首行的工艺参数补齐缺失字段，方便客户端直接绘图与展示侧栏。
     """
     safe_dev = _safe_device_id(device_id)
     safe_batch = _safe_generation_batch(batch)
-    csv_path = DEVICE_SENSOR_DIR / safe_dev / f"{safe_batch}.csv"
-    if not csv_path.exists():
+    csv_path = _find_sensor_batch_csv_path(safe_dev, safe_batch)
+    if csv_path is None:
         if _device_has_spc_batch(safe_dev, safe_batch):
             return {
                 "device_id": safe_dev,
@@ -987,7 +1799,7 @@ def get_device_batch(device_id: str, batch: str):
         with open(csv_path, encoding="utf-8-sig", newline="") as f:
             rows = list(csv.reader(f))
     except OSError as e:
-        raise HTTPException(status_code=500, detail=f"读取批次文件失败：{e}") from e
+        raise HTTPException(status_code=500, detail=f"读取单号文件失败：{e}") from e
     if len(rows) < 2:
         return {
             "device_id": safe_dev,
@@ -1022,7 +1834,7 @@ def get_device_batch(device_id: str, batch: str):
 @app.get("/spc/device/{device_id}")
 def get_spc_file_list(
     device_id: str,
-    batch: Optional[str] = Query(None, description="生产批次，不填则返回该设备全部批次"),
+    batch: Optional[str] = Query(None, description="生产单号，不填则返回该设备全部单号"),
     date_from: Optional[str] = Query(
         None, description="起始日期（含），格式 YYYY-MM-DD，如 2025-01-01"
     ),
@@ -1052,7 +1864,7 @@ def get_spc_file_list(
 @app.get("/spc/device/{device_id}/latest")
 def get_latest_spc_file(
     device_id: str,
-    batch: Optional[str] = Query(None, description="生产批次，不填则取全部批次最新"),
+    batch: Optional[str] = Query(None, description="生产单号，不填则取全部单号最新"),
 ):
     safe_device_id = _safe_device_id(device_id)
     records = _filter_by_batch(spc_store.get(safe_device_id) or [], batch)
@@ -1075,7 +1887,7 @@ def get_latest_spc_file(
 def get_spc_file_by_name(
     device_id: str,
     filename: str,
-    batch: Optional[str] = Query(None, description="生产批次"),
+    batch: Optional[str] = Query(None, description="生产单号"),
 ):
     safe_device_id = _safe_device_id(device_id)
     safe_filename = _safe_spc_filename(filename)
@@ -1102,7 +1914,7 @@ def get_spc_file_by_name(
 def get_spc_file_data(
     device_id: str,
     filename: str,
-    batch: Optional[str] = Query(None, description="生产批次"),
+    batch: Optional[str] = Query(None, description="生产单号"),
 ):
     """按文件名读取采样光谱 SPC，并返回横纵坐标数据。"""
     safe_device_id = _safe_device_id(device_id)
@@ -1146,7 +1958,7 @@ async def upload_blank_spc_file(
 @app.get("/spc/blank/device/{device_id}")
 def get_blank_spc_overview(
     device_id: str,
-    batch: Optional[str] = Query(None, description="生产批次，不填则返回该设备全部批次"),
+    batch: Optional[str] = Query(None, description="生产单号，不填则返回该设备全部单号"),
     date_from: Optional[str] = Query(
         None, description="起始日期（含），格式 YYYY-MM-DD，如 2025-01-01"
     ),
@@ -1187,7 +1999,7 @@ def get_blank_spc_overview(
 def get_latest_blank_spc_file(
     device_id: str,
     blank_type: str,
-    batch: Optional[str] = Query(None, description="生产批次，不填则取全部批次最新"),
+    batch: Optional[str] = Query(None, description="生产单号，不填则取全部单号最新"),
 ):
     """下载指定设备、指定类型的最新参比光谱 SPC 文件。"""
     safe_device_id = _safe_device_id(device_id)
@@ -1219,7 +2031,7 @@ def get_blank_spc_file_by_name(
     device_id: str,
     blank_type: str,
     filename: str,
-    batch: Optional[str] = Query(None, description="生产批次"),
+    batch: Optional[str] = Query(None, description="生产单号"),
 ):
     """按文件名下载指定设备、指定类型的参比光谱 SPC 文件。"""
     safe_device_id = _safe_device_id(device_id)
@@ -1255,7 +2067,7 @@ def get_blank_spc_file_data(
     device_id: str,
     blank_type: str,
     filename: str,
-    batch: Optional[str] = Query(None, description="生产批次"),
+    batch: Optional[str] = Query(None, description="生产单号"),
 ):
     """按文件名读取参比光谱 SPC，并返回横纵坐标数据。"""
     safe_device_id = _safe_device_id(device_id)
@@ -1294,7 +2106,7 @@ def search_spc(
         None, description="设备 ID，不填则搜索所有设备"
     ),
     batch: Optional[str] = Query(
-        None, description="生产批次，不填则搜索全部批次"
+        None, description="生产单号，不填则搜索全部单号"
     ),
     spc_type: Optional[str] = Query(
         None,

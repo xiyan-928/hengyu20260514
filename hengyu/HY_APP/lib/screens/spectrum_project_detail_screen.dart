@@ -69,14 +69,14 @@ class _SpectrumProjectDetailScreenState extends State<SpectrumProjectDetailScree
         }
         final it = (e['integration_time'] as num?)?.toInt() ?? 10000;
         final avg = (e['scans_to_average'] as num?)?.toInt() ?? 3;
-        _lastSpectrumByCategory[cat] = SpectrumData(
-          wavelengths: wl,
-          intensities: sp,
-          timestamp: DateTime.now(),
-          length: wl.length,
-          integrationTime: it,
-          scansToAverage: avg,
-        );
+        _lastSpectrumByCategory[cat] = SpectrumData.fromJson({
+          'wavelengths': wl,
+          'spectrum': sp,
+          'timestamp': DateTime.now().toIso8601String(),
+          'length': SpectrumData.acquisitionChannelCount,
+          'integration_time': it,
+          'scans_to_average': avg,
+        });
       }
     });
   }
@@ -227,9 +227,7 @@ class _SpectrumProjectDetailScreenState extends State<SpectrumProjectDetailScree
         return;
       }
       final captured = sp.currentSpectrum;
-      if (captured != null &&
-          captured.wavelengths.isNotEmpty &&
-          captured.intensities.isNotEmpty) {
+      if (captured != null && captured.intensities.isNotEmpty) {
         setState(() {
           _lastSpectrumByCategory[category] = captured;
         });
@@ -258,9 +256,8 @@ class _SpectrumProjectDetailScreenState extends State<SpectrumProjectDetailScree
     required String techHint,
   }) {
     final last = _lastSpectrumByCategory[category];
-    final hasChart = last != null &&
-        last.wavelengths.isNotEmpty &&
-        last.intensities.isNotEmpty;
+    final hasChart =
+        last != null && last.intensities.isNotEmpty;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 12),

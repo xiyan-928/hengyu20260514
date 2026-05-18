@@ -44,7 +44,7 @@ class DeviceData(BaseModel):
     bridge_state: str = "reset"
     bridge_error: Optional[str] = None
     bridge_last_update_ts: Optional[float] = None
-    # ---- 工艺/批次元数据（可选，监控历史页侧栏展示） ----
+    # ---- 工艺/单号元数据（可选，监控历史页侧栏展示） ----
     generation_batch: Optional[str] = None
     fabric_weight_g: Optional[float] = None
     fabric_length: Optional[float] = None

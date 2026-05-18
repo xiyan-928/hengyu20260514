@@ -136,6 +136,15 @@
       ],
       "devices": [
         {
+          "name": "FAN_TEMP",
+          "unit": 7,
+          "fc": 3,
+          "address": 0,
+          "count": 1,
+          "decode": "r0_minus40",
+          "comment": "风机当前温度：03 功能码读取 holding register 0x0000，温度=寄存器十进制值-40"
+        },
+        {
           "name": "FAN_UNIT_ADDRESS",
           "unit": 7,
           "fc": 3,

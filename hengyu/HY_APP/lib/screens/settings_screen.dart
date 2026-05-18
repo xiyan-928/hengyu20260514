@@ -5,7 +5,6 @@ import 'package:provider/provider.dart';
 import '../providers/spectrum_provider.dart';
 import '../services/settings_service.dart';
 import '../services/file_service.dart';
-import '../services/api_service.dart';
 
 class SettingsScreen extends StatefulWidget {
   const SettingsScreen({super.key});
@@ -77,9 +76,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
     await _settingsService.setSpectrumQueryInterval(spectrumQueryInterval);
     await _settingsService.setUseCustomDirectory(_useCustomDirectory);
     await _settingsService.setSpectrumFileFormat(_selectedFileFormat);
-    final syncResponse =
-        await ApiService().updateSpectrumQueryInterval(spectrumQueryInterval);
-    
+
     if (_useCustomDirectory && _customDirectoryController.text.isNotEmpty) {
       await _settingsService.setCustomDirectory(_customDirectoryController.text);
     }
@@ -93,13 +90,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
 
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          syncResponse.success
-              ? '设置已成功保存！'
-              : '设置已保存，但同步上传间隔失败：${syncResponse.message}',
-        ),
-        backgroundColor: syncResponse.success ? Colors.green : Colors.orange,
+      const SnackBar(
+        content: Text('设置已成功保存'),
+        backgroundColor: Colors.green,
       ),
     );
   }
@@ -231,6 +224,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                           decoration: const InputDecoration(
                             labelText: '光谱查询间隔 (s)',
                             hintText: '输入光谱查询间隔（单位：秒）',
+                            helperText:
+                                '仅影响本机 App 轮询；上报 SPC 间隔由 HY_Online device_config 配置',
                             border: OutlineInputBorder(),
                           ),
                           keyboardType: TextInputType.number,

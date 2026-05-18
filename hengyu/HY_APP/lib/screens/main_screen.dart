@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../models/spectrum_data.dart';
 import '../providers/spectrum_provider.dart';
 import '../providers/sensor_provider.dart';
 import '../widgets/spectrum_chart.dart';
@@ -452,8 +453,10 @@ class _MainScreenState extends State<MainScreen> {
         children: [
           _buildInfoItem('积分时间', '${provider.integrationTime} μs'),
           _buildInfoItem('平均扫描', '${provider.scansToAverage}'),
-          _buildInfoItem('数据点数', '${spectrum.wavelengths.length}'),
-          _buildInfoItem('波长范围', '${spectrum.wavelengths.first.toStringAsFixed(1)}-${spectrum.wavelengths.last.toStringAsFixed(1)} nm'),
+          _buildInfoItem('数据点数', '${spectrum.intensities.length}'),
+          _buildInfoItem(
+              '波长范围',
+              '${SpectrumData.acquisitionWavelengthMinNm}-${SpectrumData.acquisitionWavelengthMaxNm} nm'),
         ],
       ),
     );

@@ -259,8 +259,8 @@ class _SpectrumChartState extends State<SpectrumChart> {
           show: true,
           border: Border.all(color: Colors.grey.shade300, width: 1),
         ),
-        minX: spectrumData.wavelengths.first,
-        maxX: spectrumData.wavelengths.last,
+        minX: SpectrumData.acquisitionWavelengthMinNm.toDouble(),
+        maxX: SpectrumData.acquisitionWavelengthMaxNm.toDouble(),
         minY: _minY,
         maxY: _maxY,
         lineBarsData: [
@@ -300,15 +300,12 @@ class _SpectrumChartState extends State<SpectrumChart> {
 
   List<FlSpot> _createSpots(SpectrumData spectrumData) {
     final spots = <FlSpot>[];
-    final minLength = [spectrumData.wavelengths.length, spectrumData.intensities.length].reduce((a, b) => a < b ? a : b);
-    
-    for (int i = 0; i < minLength; i++) {
+    for (var i = 0; i < spectrumData.intensities.length; i++) {
       spots.add(FlSpot(
-        spectrumData.wavelengths[i],
+        spectrumData.wavelengthAt(i),
         spectrumData.intensities[i].toDouble(),
       ));
     }
-    
     return spots;
   }
 

@@ -877,9 +877,11 @@ class SpectrumAcquisitionManager:
 
                 # 自动落盘为 SPC 文件（IO 在锁外执行，避免长时间持锁）
                 try:
-                    from Devices.get_spc import convert_spectrum_to_spc, BLANK_SPC_OUTPUT_DIR
+                    from Devices.get_spc import convert_spectrum_to_spc, get_blank_spc_dir
                     ts_str = time.strftime("%Y%m%d_%H%M%S", time.localtime(ts_now))
-                    auto_filename = os.path.join(BLANK_SPC_OUTPUT_DIR, f"{blank_type}_{ts_str}")
+                    auto_filename = os.path.join(
+                        get_blank_spc_dir(), f"{blank_type}_{ts_str}"
+                    )
                     spc_result = convert_spectrum_to_spc(wavelengths, spectrum, auto_filename)
                     data.spc_file_path = spc_result["file_path"]
                     logger.info(f"参比光谱已落盘 [{label}]: {data.spc_file_path}")

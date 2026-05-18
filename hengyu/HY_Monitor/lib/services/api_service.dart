@@ -63,7 +63,7 @@ class ApiService {
     return const [];
   }
 
-  /// `GET /device/{id}/batches` — 列出该设备已落盘的所有生产批次。
+  /// `GET /device/{id}/batches` — 列出该设备已落盘的所有生产单号（CSV 粒度）。
   Future<List<BatchInfo>> listBatches(String deviceId) async {
     final resp = await _get('/device/${Uri.encodeComponent(deviceId)}/batches');
     final body = _decode(resp);
@@ -77,7 +77,7 @@ class ApiService {
     return const [];
   }
 
-  /// `GET /device/{id}/batch/{batch}` — 加载某个批次 CSV 的全部历史记录。
+  /// `GET /device/{id}/batch/{batch}` — 加载某个单号对应 CSV 的全部历史记录。
   Future<List<DeviceData>> getBatchHistory(
     String deviceId,
     String batch,

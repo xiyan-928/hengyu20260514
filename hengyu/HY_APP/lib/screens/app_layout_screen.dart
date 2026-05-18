@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/spectrum_provider.dart';
@@ -316,8 +318,174 @@ class NavigationItem {
   });
 }
 
-class DataCollectionContent extends StatelessWidget {
+class DataCollectionContent extends StatefulWidget {
   const DataCollectionContent({super.key});
+
+  @override
+  State<DataCollectionContent> createState() => _DataCollectionContentState();
+}
+
+class _DataCollectionContentState extends State<DataCollectionContent> {
+  // 与后端字段保持一致的占位常量；未拿到任何来源单号时显示该值。
+  static const String _orderPlaceholder = '未获取';
+
+  String _serverOrderNumber = '';
+  String _manualOrderNumber = '';
+  /// 后端 ``effective``；展示以 ``source``+分字段为准，本字段作兜底。
+  String _effectiveOrderNumber = '';
+  String _orderSource = 'placeholder'; // server / manual / placeholder
+  Timer? _orderPollTimer;
+  final ApiService _orderApi = ApiService();
+
+  static String _orderStrFromPayload(dynamic v) {
+    if (v == null) return '';
+    final s = v.toString().trim();
+    return s;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshOrderNumber();
+    // 后端轮询 server 单号；前端定期同步 UI
+    _orderPollTimer = Timer.periodic(
+      const Duration(seconds: 3),
+      (_) => _refreshOrderNumber(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _orderPollTimer?.cancel();
+    _orderApi.dispose();
+    super.dispose();
+  }
+
+  Future<void> _refreshOrderNumber() async {
+    final resp = await _orderApi.getOrderNumberState();
+    if (!mounted || !resp.success || resp.data == null) return;
+    final data = resp.data!;
+    setState(() {
+      _serverOrderNumber = _orderStrFromPayload(data['server_value']);
+      _manualOrderNumber = _orderStrFromPayload(data['manual_value']);
+      _effectiveOrderNumber = _orderStrFromPayload(data['effective']);
+      final src = _orderStrFromPayload(data['source']).toLowerCase();
+      _orderSource = src.isEmpty ? 'placeholder' : src;
+    });
+  }
+
+  String get _displayedOrderNumber {
+    // 与「服务器 > 手动」及角标 source 对齐：优先用对应来源字段，避免 effective 滞后或 JSON 类型不一致
+    switch (_orderSource) {
+      case 'server':
+        if (_serverOrderNumber.isNotEmpty) return _serverOrderNumber;
+        break;
+      case 'manual':
+        if (_manualOrderNumber.isNotEmpty) return _manualOrderNumber;
+        break;
+    }
+    final e = _effectiveOrderNumber.trim();
+    if (e.isNotEmpty && e != _orderPlaceholder) return e;
+    if (_serverOrderNumber.isNotEmpty) return _serverOrderNumber;
+    if (_manualOrderNumber.isNotEmpty) return _manualOrderNumber;
+    return _orderPlaceholder;
+  }
+
+  /// 输入框旁说明：与后端「服务器覆盖手改」一致。
+  Widget _orderDialogHint() {
+    final lines = <String>[];
+    if (_serverOrderNumber.isNotEmpty) {
+      lines.add('当前由服务器下发：$_serverOrderNumber');
+      lines.add('有新下发时会覆盖手改；仅当服务器暂无单号时，手动输入才会作为主界面单号。');
+    } else if (_manualOrderNumber.isNotEmpty) {
+      lines.add('当前为手动单号（服务器暂无下发）。服务器一旦下发将自动切换为服务器单号。');
+    }
+    if (lines.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Text(
+        lines.join('\n'),
+        style: TextStyle(
+          fontSize: 12,
+          color: Colors.orange.shade800,
+        ),
+      ),
+    );
+  }
+
+  String get _orderSourceLabel {
+    switch (_orderSource) {
+      case 'server':
+        return '服务器下发';
+      case 'manual':
+        return '手动输入';
+      default:
+        return '占位';
+    }
+  }
+
+  void _showOrderNumberDialog() {
+    final dialogController =
+        TextEditingController(text: _manualOrderNumber);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.tag, color: Colors.blue),
+            SizedBox(width: 8),
+            Text('输入单号'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _orderDialogHint(),
+            TextField(
+              controller: dialogController,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: '请输入单号（留空清除手动值）',
+                border: OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => _confirmOrderNumber(ctx, dialogController),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () => _confirmOrderNumber(ctx, dialogController),
+            child: const Text('确认'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _confirmOrderNumber(
+      BuildContext ctx, TextEditingController controller) async {
+    final value = controller.text.trim();
+    Navigator.of(ctx).pop();
+    final resp = await _orderApi.setManualOrderNumber(
+      value.isEmpty ? null : value,
+    );
+    if (!mounted) return;
+    if (!resp.success) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('单号提交失败：${resp.message}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+    await _refreshOrderNumber();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -334,6 +502,64 @@ class DataCollectionContent extends StatelessWidget {
         backgroundColor: Colors.blue.shade700,
         elevation: 0,
         automaticallyImplyLeading: false,
+        actions: [
+          Center(
+            child: GestureDetector(
+              onTap: _showOrderNumberDialog,
+              child: Container(
+                margin: const EdgeInsets.only(right: 12),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.18),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: Colors.white.withOpacity(0.35)),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text(
+                      '单号：',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Text(
+                      _displayedOrderNumber,
+                      style: TextStyle(
+                        color: _orderSource == 'placeholder'
+                            ? Colors.white.withOpacity(0.7)
+                            : Colors.white,
+                        fontSize: 15,
+                        fontWeight: _orderSource == 'placeholder'
+                            ? FontWeight.w400
+                            : FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withOpacity(0.25),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Text(
+                        _orderSourceLabel,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),

@@ -75,7 +75,7 @@ DEFAULT_CONFIG = {
         "autorun_open_points": [],
     },
     "spectrum": {
-        "query_interval_sec": 5,
+        "query_interval_sec": 60,
     },
 }
 
@@ -159,9 +159,9 @@ class DeviceSettings:
         """光谱查询间隔；上传客户端使用同一值作为采样 SPC 上传间隔。"""
         spectrum = self._config.get("spectrum") or {}
         try:
-            value = float(spectrum.get("query_interval_sec", 5))
+            value = float(spectrum.get("query_interval_sec", 60))
         except (TypeError, ValueError):
-            value = 5.0
+            value = 60.0
         return max(1.0, value)
 
     def get_modbus_coils_endpoint(self) -> Tuple[str, int]:

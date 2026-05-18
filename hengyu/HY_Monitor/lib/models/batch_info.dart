@@ -1,3 +1,10 @@
+/// 生成单号下拉框「条数」含义：历史页用传感器条数，SPC 页用采样光谱文件条数，参比页用参比光谱条数。
+enum BatchSidebarCountKind {
+  sensor,
+  spectrumSample,
+  blankReference,
+}
+
 /// 与 `HY_Server/test1.py::list_device_batches` 返回的元素结构对齐。
 class BatchInfo {
   BatchInfo({
@@ -7,17 +14,25 @@ class BatchInfo {
     this.firstTime,
     this.lastTime,
     this.process = const <String, dynamic>{},
+    this.spectrumFileCount = 0,
+    this.blankSpcFileCount = 0,
   });
 
-  /// 批次号（即 CSV 文件名去后缀，已经过服务端 `_safe_generation_batch` 净化）。
+  /// 单号（即 CSV 文件名去后缀，已经过服务端 `_safe_generation_batch` 净化）。
   final String batch;
   final String? filename;
   final int count;
   final DateTime? firstTime;
   final DateTime? lastTime;
 
-  /// 工艺参数原始 Map（生成批次、布重、布长宽高厚密度材料、浴比等）。
+  /// 工艺参数原始 Map（生成单号、布重、布长宽高厚密度材料、浴比等）。
   final Map<String, dynamic> process;
+
+  /// 该单号下 `spc_store` 采样光谱文件数（与 `GET /spc/device/{id}` 列表一致，不含暗光谱）。
+  final int spectrumFileCount;
+
+  /// 该单号下全部类型的参比光谱文件总数。
+  final int blankSpcFileCount;
 
   String? get generationBatch =>
       (process['generation_batch'] as Object?)?.toString();
@@ -31,11 +46,23 @@ class BatchInfo {
       (process['fabric_material'] as Object?)?.toString();
   double? get bathRatio => _asDouble(process['bath_ratio']);
 
-  /// 下拉框中显示的标签：优先用 `generation_batch`，否则退回 batch 文件名。
+  /// 下拉框中显示的标签：优先用 `generation_batch`（单号），否则退回 CSV 文件名。
   String get displayLabel {
     final gb = generationBatch;
     if (gb != null && gb.isNotEmpty) return gb;
     return batch;
+  }
+
+  /// 侧栏「生成单号」下拉项中单号后的条数。
+  int countForSidebar(BatchSidebarCountKind kind) {
+    switch (kind) {
+      case BatchSidebarCountKind.sensor:
+        return count;
+      case BatchSidebarCountKind.spectrumSample:
+        return spectrumFileCount;
+      case BatchSidebarCountKind.blankReference:
+        return blankSpcFileCount;
+    }
   }
 
   factory BatchInfo.fromJson(Map<String, dynamic> j) {
@@ -48,6 +75,8 @@ class BatchInfo {
       process: (j['process'] is Map)
           ? Map<String, dynamic>.from(j['process'] as Map)
           : const <String, dynamic>{},
+      spectrumFileCount: _asInt(j['spectrum_file_count']) ?? 0,
+      blankSpcFileCount: _asInt(j['blank_spc_file_count']) ?? 0,
     );
   }
 
